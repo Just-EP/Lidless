@@ -39,6 +39,27 @@ struct MenuContent: View {
                 .padding(.horizontal, hInset)
                 .padding(.vertical, 10)
 
+            // Three disjoint slots, strongest first: something changed the flag
+            // behind our back, we couldn't confirm our own change, and the
+            // ordinary error/safety note.
+            if let notice = state.externalNotice {
+                Label(notice, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, hInset)
+                    .padding(.bottom, 10)
+            }
+
+            if let notice = state.verificationNotice {
+                Label(notice, systemImage: "questionmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, hInset)
+                    .padding(.bottom, 10)
+            }
+
             if let err = state.lastError {
                 Label(err, systemImage: "info.circle")
                     .font(.callout)
@@ -64,6 +85,9 @@ struct MenuContent: View {
                 .padding(.bottom, 14)
         }
         .frame(width: 360)
+        // The popover is the moment the user actually looks at the toggle, so
+        // it's the moment it most needs to be true.
+        .onAppear { state.refreshState() }
     }
 }
 

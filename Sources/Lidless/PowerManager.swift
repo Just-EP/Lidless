@@ -12,9 +12,16 @@ import Foundation
 struct PowerManager {
 
     /// Read the current `SleepDisabled` flag from `pmset -g`.
-    func isSleepDisabled() -> Bool {
-        guard let out = Shell.capture("/usr/bin/pmset", ["-g"]) else { return false }
-        return PowerParsers.isSleepDisabled(pmsetG: out)
+    ///
+    /// Returns nil whenever the flag wasn't actually observed — `pmset` failed to
+    /// launch, exited non-zero, or printed something that doesn't state the flag.
+    /// A failed read must never collapse into "off".
+    ///
+    /// Reading needs no privileges, so this is the app's read path whether or not
+    /// the helper is installed; the helper is only needed to *change* the flag.
+    func isSleepDisabled() -> Bool? {
+        guard let out = Shell.capture("/usr/bin/pmset", ["-g"]) else { return nil }
+        return PowerParsers.sleepDisabled(pmsetG: out)
     }
 
     /// Set or clear the flag. Throws with the underlying error message on failure
