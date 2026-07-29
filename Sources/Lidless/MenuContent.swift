@@ -250,8 +250,9 @@ private struct SettingsButton: View {
 
     var body: some View {
         Button {
-            // No `dismiss()` here: it can't reach the MenuBarExtra panel
-            // (FB11984872). The panel closes when the settings window takes key.
+            // The popover won't close on its own: SwiftUI's `dismiss()` can't
+            // reach it, and an accessory app can't reliably take key away from it.
+            MenuBarExtraPanel.dismiss()
             state.showSettings()
         } label: {
             Label("Settings…", systemImage: "gearshape")
