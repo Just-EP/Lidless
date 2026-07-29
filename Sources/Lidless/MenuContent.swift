@@ -247,16 +247,43 @@ private struct SafetySection: View {
     }
 }
 
-/// Full-width low-battery cutoff slider (0–100%, step 1). `0` means "Never" —
-/// the low-battery check is disabled entirely.
+/// Full-width low-battery cutoff slider (0–100%, snapping in 5% steps). `0` means
+/// "Never" — the low-battery check is disabled entirely.
 private struct LowBatteryCutoffRow: View {
     @EnvironmentObject var state: AppState
 
+    /// The value shown while dragging. Committing on every step would write
+    /// UserDefaults — and, in auto mode, run a reconcile that can reach the
+    /// privileged helper — once per 5% of travel, so the commit waits for the
+    /// drag to end.
+    @State private var dragging: Double?
+
     private var threshold: Int { state.settings.lowBatteryThreshold }
 
-    /// The cutoff is meaningless while "Only while charging" is on (keep-awake is
-    /// already blocked whenever off power), so the row is disabled/greyed then.
-    private var isInactive: Bool { state.settings.onlyWhileCharging }
+    /// The committed value, or the in-flight one while a drag is in progress.
+    private var shown: Int { Int((dragging ?? Double(threshold)).rounded()) }
+
+    /// The cutoff only ever fires off power, so it's meaningless whenever
+    /// keep-awake is already gated on being plugged in — under "Only while
+    /// charging", and equally under auto mode, which requires external power.
+    private var isInactive: Bool {
+        state.settings.onlyWhileCharging || state.settings.autoEnableWhenCharging
+    }
+
+    private var value: Binding<Double> {
+        Binding(get: { dragging ?? Double(threshold) },
+                set: { dragging = $0 })
+    }
+
+    /// Commit the dragged value once the drag ends, and only if it actually moved.
+    private func commit(editing: Bool) {
+        guard !editing, let value = dragging else { return }
+        dragging = nil
+        var updated = state.settings
+        updated.lowBatteryThreshold = Int(value.rounded())
+        guard updated != state.settings else { return }
+        state.updateSettings(updated)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -265,26 +292,19 @@ private struct LowBatteryCutoffRow: View {
                     .font(.callout)
                     .lineLimit(1)
                 Spacer(minLength: 16)
-                Text(threshold == 0 ? "Never" : "\(threshold)%")
+                Text(shown == 0 ? "Never" : "\(shown)%")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
 
-            Slider(
-                value: Binding(
-                    get: { Double(threshold) },
-                    set: { v in var s = state.settings; s.lowBatteryThreshold = Int(v.rounded()); state.updateSettings(s) }
-                ),
-                in: 0...100,
-                step: 5
-            ) {
-                Text("Low-battery cutoff")
-            } minimumValueLabel: {
-                Text("Never").font(.caption2).foregroundStyle(.secondary)
-            } maximumValueLabel: {
-                Text("100%").font(.caption2).foregroundStyle(.secondary)
-            }
+            Slider(value: value,
+                   in: 0...100,
+                   step: 5,
+                   label: { Text("Low-battery cutoff") },
+                   minimumValueLabel: { Text("Never").font(.caption2).foregroundStyle(.secondary) },
+                   maximumValueLabel: { Text("100%").font(.caption2).foregroundStyle(.secondary) },
+                   onEditingChanged: commit)
             .labelsHidden()
             .controlSize(.small)
         }

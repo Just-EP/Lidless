@@ -4,6 +4,13 @@ final class SafetyEvaluatorTests: XCTestCase {
 
     private let defaults = SafetySettings.default
 
+    /// Defaults with auto-enable mode switched on.
+    private var auto: SafetySettings {
+        var s = SafetySettings.default
+        s.autoEnableWhenCharging = true
+        return s
+    }
+
     func testSafeWhenChargingAndCool() {
         let info = BatteryInfo(percent: 50, onAC: true)
         XCTAssertNil(SafetyEvaluator.reasonToDisable(battery: info, thermalSerious: false, settings: defaults))
@@ -51,6 +58,13 @@ final class SafetyEvaluatorTests: XCTestCase {
         XCTAssertEqual(SafetyReason.highThermal.message, "Auto-paused: the Mac is running hot.")
         XCTAssertEqual(SafetyReason.notCharging.message, "Auto-paused: not on charger.")
         XCTAssertEqual(SafetyReason.lowBattery(12).message, "Auto-paused: battery 12% on battery power.")
+        XCTAssertEqual(SafetyReason.notOnPower.message, "Auto-paused: not connected to power.")
+    }
+
+    func testNotOnPowerPhrasing() {
+        XCTAssertEqual(SafetyReason.notOnPower.blockedMessage,
+                       "Connect your Mac to power to keep it awake.")
+        XCTAssertEqual(SafetyReason.notOnPower.checkLabel, "Not connected to power")
     }
 
     // MARK: Low-battery cutoff = "Never" (0)
@@ -80,11 +94,76 @@ final class SafetyEvaluatorTests: XCTestCase {
             battery: BatteryInfo(percent: 100, onAC: true), thermalSerious: true, settings: defaults))
     }
 
-    func testAutoEnableBlockedByOnlyWhileChargingIsMootOnPower() {
+    func testOnlyWhileChargingIsMootOnPower() {
         var s = defaults
         s.onlyWhileCharging = true
         XCTAssertTrue(AutoEnablePolicy.canActivate(
             battery: BatteryInfo(percent: 50, onAC: true), thermalSerious: false, settings: s))
+    }
+
+    // MARK: AutoEnablePolicy.target — the state reconcile() acts on
+
+    /// `auto` mode off: never our call to make, whatever else is true.
+    func testTargetIsNilWhenAutoModeOff() {
+        XCTAssertNil(AutoEnablePolicy.target(
+            armed: true, currentlyEnabled: false,
+            battery: BatteryInfo(percent: 90, onAC: true),
+            thermalSerious: false, settings: defaults))
+    }
+
+    func testTargetTurnsOnWhenArmedAndPluggedIn() {
+        XCTAssertEqual(AutoEnablePolicy.target(
+            armed: true, currentlyEnabled: false,
+            battery: BatteryInfo(percent: 90, onAC: true),
+            thermalSerious: false, settings: auto), true)
+    }
+
+    func testTargetTurnsOffWhenUnplugged() {
+        XCTAssertEqual(AutoEnablePolicy.target(
+            armed: true, currentlyEnabled: true,
+            battery: BatteryInfo(percent: 90, onAC: false),
+            thermalSerious: false, settings: auto), false)
+    }
+
+    func testTargetTurnsOffWhenDisarmed() {
+        XCTAssertEqual(AutoEnablePolicy.target(
+            armed: false, currentlyEnabled: true,
+            battery: BatteryInfo(percent: 90, onAC: true),
+            thermalSerious: false, settings: auto), false)
+    }
+
+    func testTargetTurnsOffWhenRunningHot() {
+        XCTAssertEqual(AutoEnablePolicy.target(
+            armed: true, currentlyEnabled: true,
+            battery: BatteryInfo(percent: 90, onAC: true),
+            thermalSerious: true, settings: auto), false)
+    }
+
+    /// The poll runs every 30s; a target equal to the live state must report
+    /// "nothing to do" so we never rewrite the system flag on an idle tick.
+    func testTargetIsNilWhenAlreadyCorrect() {
+        XCTAssertNil(AutoEnablePolicy.target(
+            armed: true, currentlyEnabled: true,
+            battery: BatteryInfo(percent: 90, onAC: true),
+            thermalSerious: false, settings: auto))
+        XCTAssertNil(AutoEnablePolicy.target(
+            armed: false, currentlyEnabled: false,
+            battery: BatteryInfo(percent: 90, onAC: true),
+            thermalSerious: false, settings: auto))
+        XCTAssertNil(AutoEnablePolicy.target(
+            armed: true, currentlyEnabled: false,
+            battery: BatteryInfo(percent: 90, onAC: false),
+            thermalSerious: false, settings: auto))
+    }
+
+    /// Armed and plugged in, but the cutoff can't fire on power — so it stays on.
+    func testTargetIgnoresCutoffWhileOnPower() {
+        var s = auto
+        s.lowBatteryThreshold = 95
+        XCTAssertEqual(AutoEnablePolicy.target(
+            armed: true, currentlyEnabled: false,
+            battery: BatteryInfo(percent: 10, onAC: true),
+            thermalSerious: false, settings: s), true)
     }
 
     // MARK: allUnmetReasons
@@ -114,6 +193,23 @@ final class SafetyEvaluatorTests: XCTestCase {
         let reasons = SafetyEvaluator.allUnmetReasons(
             battery: info, thermalSerious: false, settings: s, requirePower: true)
         XCTAssertEqual(reasons, [.notOnPower])
+    }
+
+    /// `reasonToDisable` and `allUnmetReasons` share one low-battery predicate;
+    /// this pins them together across the whole threshold boundary so a future
+    /// edit to one can't quietly diverge from the other.
+    func testLowBatteryAgreesAcrossBothEvaluators() {
+        var s = defaults
+        s.lowBatteryThreshold = 20
+        for percent in [0, 1, 19, 20, 21, 100] {
+            let info = BatteryInfo(percent: percent, onAC: false)
+            let single = SafetyEvaluator.reasonToDisable(
+                battery: info, thermalSerious: false, settings: s) == .lowBattery(percent)
+            let listed = SafetyEvaluator.allUnmetReasons(
+                battery: info, thermalSerious: false, settings: s,
+                requirePower: false).contains(.lowBattery(percent))
+            XCTAssertEqual(single, listed, "disagreement at \(percent)%")
+        }
     }
 
     func testAllUnmetReasonsIncludesThermal() {

@@ -85,12 +85,18 @@ public enum SafetyEvaluator {
         if settings.onlyWhileCharging && !battery.onAC {
             return .notCharging
         }
-        if settings.lowBatteryThreshold > 0
-            && !battery.onAC
-            && battery.percent <= settings.lowBatteryThreshold {
-            return .lowBattery(battery.percent)
-        }
-        return nil
+        return lowBatteryReason(battery: battery, settings: settings)
+    }
+
+    /// The low-battery check, shared by `reasonToDisable` and `allUnmetReasons`
+    /// so the two can't drift. Only fires off power, and a threshold of 0
+    /// ("Never") disables it entirely.
+    private static func lowBatteryReason(battery: BatteryInfo,
+                                         settings: SafetySettings) -> SafetyReason? {
+        guard settings.lowBatteryThreshold > 0,
+              !battery.onAC,
+              battery.percent <= settings.lowBatteryThreshold else { return nil }
+        return .lowBattery(battery.percent)
     }
 
     /// Every currently-unmet check, for the auto-mode warning list — unlike
@@ -111,10 +117,8 @@ public enum SafetyEvaluator {
         } else if settings.onlyWhileCharging && !battery.onAC {
             reasons.append(.notCharging)
         }
-        if settings.lowBatteryThreshold > 0
-            && !battery.onAC
-            && battery.percent <= settings.lowBatteryThreshold {
-            reasons.append(.lowBattery(battery.percent))
+        if let lowBattery = lowBatteryReason(battery: battery, settings: settings) {
+            reasons.append(lowBattery)
         }
         return reasons
     }
@@ -132,5 +136,21 @@ public enum AutoEnablePolicy {
         return SafetyEvaluator.reasonToDisable(battery: battery,
                                                thermalSerious: thermalSerious,
                                                settings: settings) == nil
+    }
+
+    /// The live keep-awake state auto mode wants, or `nil` when there's nothing
+    /// to do — auto mode is off, or the live state already matches. Returning
+    /// `nil` for "already correct" keeps the caller from writing the system flag
+    /// on every poll tick.
+    public static func target(armed: Bool,
+                              currentlyEnabled: Bool,
+                              battery: BatteryInfo,
+                              thermalSerious: Bool,
+                              settings: SafetySettings) -> Bool? {
+        guard settings.autoEnableWhenCharging else { return nil }
+        let shouldBeOn = armed && canActivate(battery: battery,
+                                              thermalSerious: thermalSerious,
+                                              settings: settings)
+        return shouldBeOn == currentlyEnabled ? nil : shouldBeOn
     }
 }

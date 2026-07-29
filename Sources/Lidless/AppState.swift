@@ -30,8 +30,9 @@ final class AppState: ObservableObject {
 
     /// Auto-mode master-toggle intent (persisted): whether the user wants
     /// keep-awake armed. In auto mode the *live* state (`isEnabled`) is derived
-    /// from `armed` gated by power + safety; in manual mode this simply mirrors
-    /// `isEnabled`. See `reconcile()`.
+    /// from `armed` gated by power + safety — see `reconcile()`. Unused in manual
+    /// mode, where the toggle drives `isEnabled` directly; it's (re-)seeded on the
+    /// way into auto mode rather than tracked continuously.
     @Published var armed = false
 
     /// The currently-unmet checks to surface in the popover's auto-mode warning,
@@ -39,8 +40,7 @@ final class AppState: ObservableObject {
     /// is on, the feature is armed, but keep-awake isn't live right now.
     var autoWarningReasons: [SafetyReason] {
         guard settings.autoEnableWhenCharging, armed, !isEnabled else { return [] }
-        let info = BatteryInfo(percent: batteryPercent, onAC: batteryOnAC)
-        return SafetyEvaluator.allUnmetReasons(battery: info,
+        return SafetyEvaluator.allUnmetReasons(battery: currentBattery,
                                                thermalSerious: thermalSerious(),
                                                settings: settings,
                                                requirePower: true)
@@ -125,10 +125,11 @@ final class AppState: ObservableObject {
         refreshState()
         refreshBattery()
         // Auto mode owns the live state at launch: (re-)activate if armed and
-        // conditions allow, or force it off otherwise (in case a prior session
-        // left it on). `force` because the async `refreshState()` above may not
-        // have reported the real state back yet.
-        if settings.autoEnableWhenCharging { reconcile(force: true) }
+        // conditions allow, or turn it off if a prior session left it on with
+        // conditions since lapsed. `refreshState()` above reads the flag
+        // synchronously, so `isEnabled` is already the real state to compare
+        // against and there's nothing to force.
+        reconcile()
         batteryTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -194,15 +195,22 @@ final class AppState: ObservableObject {
         store.save(new)
         if new.autoEnableWhenCharging {
             if !wasAuto {
-                // Entering auto mode: seed the armed intent from the current live
-                // state, and drop any manual auto-off countdown (auto mode manages
-                // activation itself, so a countdown would just fight it).
-                armed = isEnabled
+                // Opting into auto mode *is* the request to have keep-awake on, so
+                // arm it rather than inheriting the current live state — otherwise
+                // switching on "Automatically enable when charging" while
+                // keep-awake happens to be off (the very case this feature exists
+                // for) would visibly do nothing. Also drop any manual auto-off
+                // countdown, which would just fight auto mode's own activation.
+                armed = true
                 store.saveArmed(armed)
                 cancelAutoOff()
             }
             reconcile()
         } else {
+            // Leaving auto mode hands activation back to the user, so the auto-off
+            // countdown becomes applicable again — re-arm it if one is configured
+            // and keep-awake is currently on.
+            if wasAuto, isEnabled { armAutoOff() }
             evaluateSafety()
         }
     }
@@ -214,7 +222,7 @@ final class AppState: ObservableObject {
         if settings.autoEnableWhenCharging {
             setArmed(on)
         } else {
-            setEnabled(on, userInitiated: true)
+            setEnabled(on, origin: .user)
         }
     }
 
@@ -226,16 +234,38 @@ final class AppState: ObservableObject {
     }
 
     /// Auto mode: derive the live keep-awake state from `armed` gated by external
-    /// power + safety, flipping only the live state (never the `armed` intent) and
-    /// without alerts. When conditions aren't met the feature stays armed and the
-    /// popover's warning explains why it isn't currently active.
-    func reconcile(force: Bool = false) {
-        guard settings.autoEnableWhenCharging else { return }
-        let shouldBeOn = armed && AutoEnablePolicy.canActivate(battery: battery.read(),
-                                                               thermalSerious: thermalSerious(),
-                                                               settings: settings)
-        guard force || shouldBeOn != isEnabled else { return }
-        setEnabled(shouldBeOn, note: nil)
+    /// power + safety, flipping only the live state (never the `armed` intent).
+    /// When conditions aren't met the feature stays armed and the popover's
+    /// warning explains why it isn't currently active.
+    ///
+    /// Refreshes the battery cache first so the decision and the warning list the
+    /// popover renders from it are read off the same sample. No-ops when auto mode
+    /// is off or the live state already matches — `origin: .auto` because this
+    /// fires unprompted on the poll timer and must stay silent.
+    func reconcile() {
+        guard settings.autoEnableWhenCharging, !reconciling else { return }
+        reconciling = true
+        defer { reconciling = false }
+        refreshBattery()
+        guard let target = AutoEnablePolicy.target(armed: armed,
+                                                   currentlyEnabled: isEnabled,
+                                                   battery: currentBattery,
+                                                   thermalSerious: thermalSerious(),
+                                                   settings: settings) else { return }
+        setEnabled(target, note: nil, origin: .auto)
+    }
+
+    /// Guards against re-entering `reconcile()` from inside its own write. The
+    /// read-back in `setEnabled` is synchronous, so a write that never lands
+    /// resolves as a mismatch, adopts the unchanged state, and would ask us to
+    /// write again — recursing until the stack runs out. One pass per call is
+    /// always enough: the next poll tick retries.
+    private var reconciling = false
+
+    /// The last-sampled battery state, refreshed by `refreshBattery()`. Shared by
+    /// `reconcile()` and `autoWarningReasons` so the two can't disagree.
+    private var currentBattery: BatteryInfo {
+        BatteryInfo(percent: batteryPercent, onAC: batteryOnAC)
     }
 
     /// Change the auto-off duration. Re-arms (or cancels) the live timer when
@@ -453,7 +483,15 @@ final class AppState: ObservableObject {
         sync.beginMutation()            // supersede every read and write still in flight
         manageHeartbeat()
         updateAutoOff(for: enabled)
-        if enabled { evaluateSafety() }
+        // Auto mode owns the live state, so route through `reconcile()` rather
+        // than the manual safety pass: adopting an outside change must be settled
+        // by the same rule that set the state in the first place, or the toggle
+        // visibly jumps and then falls back a tick later.
+        if settings.autoEnableWhenCharging {
+            reconcile()
+        } else if enabled {
+            evaluateSafety()
+        }
     }
 
     /// User flipped the toggle: `.user` origin so any failure or refusal surfaces
@@ -687,10 +725,10 @@ final class AppState: ObservableObject {
         // polling only when we think it's on would structurally miss the case
         // where it was turned on behind our back.
         refreshState()
-        refreshBattery()
         if settings.autoEnableWhenCharging {
-            reconcile()
+            reconcile()             // refreshes the battery sample itself
         } else {
+            refreshBattery()
             evaluateSafety()
         }
     }
