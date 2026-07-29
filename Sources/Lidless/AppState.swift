@@ -41,6 +41,21 @@ final class AppState: ObservableObject {
     private let loginItem = LoginItemManager()
     private lazy var onboarding = OnboardingController(state: self)
 
+    /// The app's Sparkle updater. Owned here rather than by `LidlessApp` so the
+    /// settings window controller below can hand it to `SettingsView`.
+    let updater = UpdaterController()
+
+    private lazy var settingsWindow = SettingsWindowController(
+        contentSize: SettingsView.preferredSize
+    ) { [weak self] in
+        guard let self else { return AnyView(EmptyView()) }
+        return AnyView(
+            SettingsView()
+                .environmentObject(self)
+                .environmentObject(self.updater)
+        )
+    }
+
     /// Marketing version shown in the menu.
     var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
@@ -113,6 +128,11 @@ final class AppState: ObservableObject {
     }
 
     // MARK: Settings
+
+    /// Present the Settings window from the menu-bar popover.
+    func showSettings() {
+        settingsWindow.show()
+    }
 
     func updateSettings(_ new: SafetySettings) {
         settings = new

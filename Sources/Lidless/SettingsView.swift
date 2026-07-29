@@ -4,6 +4,10 @@ import SwiftUI
 /// explanations that used to clutter the menu bar popover: launch at login,
 /// background-helper setup, the auto-off timer, and About/GitHub.
 struct SettingsView: View {
+    /// Fixed size of the window this view lives in — the view isn't resizable,
+    /// so `SettingsWindowController` sizes the window from the same constant.
+    static let preferredSize = CGSize(width: 420, height: 460)
+
     @EnvironmentObject var state: AppState
     @EnvironmentObject var updater: UpdaterController
 
@@ -83,6 +87,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 460)
+        .frame(width: Self.preferredSize.width, height: Self.preferredSize.height)
     }
 }

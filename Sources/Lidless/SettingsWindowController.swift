@@ -1,0 +1,63 @@
+import AppKit
+import SwiftUI
+
+/// Hosts the Settings window in a standalone AppKit window.
+///
+/// Lidless is an `LSUIElement` menu-bar app with no Dock presence, so SwiftUI's
+/// `Settings` scene doesn't reliably surface: `SettingsLink` (macOS 14+) never
+/// activates an accessory app, and the `showSettingsWindow:` selector isn't a
+/// dependable way to present the scene. A plain `NSWindow` gives precise control
+/// over showing, focusing, and closing — the same reasoning as
+/// `OnboardingController`.
+///
+/// The content arrives as a view factory rather than a concrete view, so this
+/// file depends only on AppKit/SwiftUI and can be compiled into the unit-test
+/// bundle (which can't link the app target).
+@MainActor
+final class SettingsWindowController {
+    private let title: String
+    private let contentSize: CGSize
+    private let frameAutosaveName: String
+    private let makeContent: () -> AnyView
+
+    private(set) var window: NSWindow?
+
+    init(title: String = "Lidless Settings",
+         contentSize: CGSize,
+         frameAutosaveName: String = "LidlessSettingsWindow",
+         makeContent: @escaping () -> AnyView) {
+        self.title = title
+        self.contentSize = contentSize
+        self.frameAutosaveName = frameAutosaveName
+        self.makeContent = makeContent
+    }
+
+    /// Show the window, building it on first use and reusing it afterwards so we
+    /// never stack duplicates.
+    func show() {
+        if window == nil {
+            let hosting = NSHostingController(rootView: makeContent())
+            let win = NSWindow(contentViewController: hosting)
+            win.title = title
+            win.styleMask = [.titled, .closable, .miniaturizable]
+            win.isReleasedWhenClosed = false
+            // The hosting controller's fitting size isn't resolved before the
+            // window is displayed, so state the size rather than inherit it.
+            win.setContentSize(contentSize)
+            // Center on creation, then let the autosave name remember wherever
+            // the user drags it. Setting the name last means a saved frame wins.
+            win.center()
+            win.setFrameAutosaveName(frameAutosaveName)
+            window = win
+        }
+
+        // The activation is the actual fix: an accessory app has to ask for the
+        // foreground itself or the window opens behind whatever is frontmost.
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func close() {
+        window?.close()
+    }
+}

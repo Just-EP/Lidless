@@ -1,0 +1,91 @@
+import AppKit
+import SwiftUI
+import XCTest
+
+/// Covers the AppKit-backed Settings window introduced for issue #22: the window
+/// is built once, reused forever, and survives being closed.
+@MainActor
+final class SettingsWindowControllerTests: XCTestCase {
+
+    private let autosaveName = "LidlessSettingsWindowTests"
+    private let contentSize = CGSize(width: 420, height: 460)
+
+    /// Counts how many times the content factory ran, so we can assert the
+    /// window (and its SwiftUI content) is built exactly once.
+    private final class BuildCounter {
+        var count = 0
+    }
+
+    private func makeController(counter: BuildCounter = BuildCounter()) -> SettingsWindowController {
+        SettingsWindowController(title: "Lidless Settings",
+                                 contentSize: contentSize,
+                                 frameAutosaveName: autosaveName) {
+            counter.count += 1
+            return AnyView(Color.clear)
+        }
+    }
+
+    override func tearDown() {
+        // Don't leave a saved frame behind in the test runner's defaults.
+        NSWindow.removeFrame(usingName: autosaveName)
+        super.tearDown()
+    }
+
+    func testWindowIsBuiltLazilyOnFirstShow() {
+        let sut = makeController()
+        XCTAssertNil(sut.window)
+        sut.show()
+        XCTAssertNotNil(sut.window)
+    }
+
+    func testSecondShowReusesTheSameWindow() {
+        let counter = BuildCounter()
+        let sut = makeController(counter: counter)
+
+        sut.show()
+        let first = sut.window
+        sut.show()
+
+        XCTAssertTrue(sut.window === first, "show() must not stack duplicate windows")
+        XCTAssertEqual(counter.count, 1, "content should be built once, not per show()")
+    }
+
+    func testShowAfterCloseReordersTheSameWindow() {
+        let sut = makeController()
+
+        sut.show()
+        let first = sut.window
+        sut.close()
+        XCTAssertEqual(first?.isVisible, false)
+
+        sut.show()
+        XCTAssertTrue(sut.window === first)
+        XCTAssertEqual(sut.window?.isVisible, true)
+    }
+
+    func testWindowConfiguration() throws {
+        let sut = makeController()
+        sut.show()
+        let window = try XCTUnwrap(sut.window)
+
+        XCTAssertEqual(window.title, "Lidless Settings")
+        XCTAssertTrue(window.styleMask.contains(.titled))
+        XCTAssertTrue(window.styleMask.contains(.closable))
+        // SettingsView pins its own 420x460 frame, so the window must not resize.
+        XCTAssertFalse(window.styleMask.contains(.resizable))
+        // Required for reuse: a released window would dangle after the user closes it.
+        XCTAssertFalse(window.isReleasedWhenClosed)
+        XCTAssertTrue(window.contentViewController is NSHostingController<AnyView>)
+    }
+
+    /// The hosting controller's fitting size is unresolved before display, so
+    /// the window must take the size it was given instead of inheriting one.
+    func testWindowUsesTheRequestedContentSize() throws {
+        let sut = makeController()
+        sut.show()
+        let size = try XCTUnwrap(sut.window?.contentView?.frame.size)
+
+        XCTAssertEqual(size.width, contentSize.width, accuracy: 1)
+        XCTAssertEqual(size.height, contentSize.height, accuracy: 1)
+    }
+}

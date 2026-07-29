@@ -3,7 +3,6 @@ import SwiftUI
 @main
 struct LidlessApp: App {
     @StateObject private var state = AppState()
-    @StateObject private var updater = UpdaterController()
 
     var body: some Scene {
         MenuBarExtra {
@@ -13,11 +12,7 @@ struct LidlessApp: App {
             Image(state.isEnabled ? "MenubarLaptopActive" : "MenubarLaptop")
         }
         .menuBarExtraStyle(.window)
-
-        Settings {
-            SettingsView()
-                .environmentObject(state)
-                .environmentObject(updater)
-        }
+        // No `Settings` scene: it doesn't reliably surface in an LSUIElement app
+        // (issue #22). `AppState.showSettings()` presents it via AppKit instead.
     }
 }
