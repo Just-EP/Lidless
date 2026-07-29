@@ -242,25 +242,22 @@ private struct FooterActions: View {
     }
 }
 
-/// Opens the standard macOS Settings window. Uses the native `SettingsLink` on
-/// macOS 14+, falling back to the AppKit action selector on macOS 13.
+/// Opens the Settings window. Neither `SettingsLink` nor `showSettingsWindow:`
+/// reliably activates an LSUIElement app (issue #22), so a plain button drives
+/// the AppKit-backed `SettingsWindowController` through `AppState`.
 private struct SettingsButton: View {
+    @EnvironmentObject var state: AppState
+
     var body: some View {
-        if #available(macOS 14.0, *) {
-            SettingsLink {
-                Label("Settings…", systemImage: "gearshape")
-                    .foregroundStyle(.secondary)
-            }
-            .keyboardShortcut(",", modifiers: .command)
-        } else {
-            Button {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                NSApp.activate(ignoringOtherApps: true)
-            } label: {
-                Label("Settings…", systemImage: "gearshape")
-                    .foregroundStyle(.secondary)
-            }
-            .keyboardShortcut(",", modifiers: .command)
+        Button {
+            // The popover won't close on its own: SwiftUI's `dismiss()` can't
+            // reach it, and an accessory app can't reliably take key away from it.
+            MenuBarExtraPanel.dismiss()
+            state.showSettings()
+        } label: {
+            Label("Settings…", systemImage: "gearshape")
+                .foregroundStyle(.secondary)
         }
+        .keyboardShortcut(",", modifiers: .command)
     }
 }
