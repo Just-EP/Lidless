@@ -247,11 +247,11 @@ private struct FooterActions: View {
 /// the AppKit-backed `SettingsWindowController` through `AppState`.
 private struct SettingsButton: View {
     @EnvironmentObject var state: AppState
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         Button {
-            dismiss()
+            // No `dismiss()` here: it can't reach the MenuBarExtra panel
+            // (FB11984872). The panel closes when the settings window takes key.
             state.showSettings()
         } label: {
             Label("Settings…", systemImage: "gearshape")

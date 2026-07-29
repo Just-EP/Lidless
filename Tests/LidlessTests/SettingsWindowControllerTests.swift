@@ -78,6 +78,29 @@ final class SettingsWindowControllerTests: XCTestCase {
         XCTAssertTrue(window.contentViewController is NSHostingController<AnyView>)
     }
 
+    /// An accessory app deactivates constantly and the user may have switched
+    /// Spaces since the window was last shown; either would hide it.
+    func testWindowFollowsTheUserRatherThanHiding() throws {
+        let sut = makeController()
+        sut.show()
+        let window = try XCTUnwrap(sut.window)
+
+        XCTAssertTrue(window.collectionBehavior.contains(.moveToActiveSpace))
+        XCTAssertFalse(window.hidesOnDeactivate)
+    }
+
+    /// `orderFrontRegardless()` shows the window even when the app hasn't won
+    /// activation — which for an accessory app is the common case.
+    ///
+    /// The companion behaviour, taking key (which is what dismisses the
+    /// MenuBarExtra popover), isn't asserted here: the `xctest` runner is never
+    /// the active app, so no window in it can become key. That part is manual QA.
+    func testShowMakesTheWindowVisible() throws {
+        let sut = makeController()
+        sut.show()
+        XCTAssertTrue(try XCTUnwrap(sut.window).isVisible)
+    }
+
     /// The hosting controller's fitting size is unresolved before display, so
     /// the window must take the size it was given instead of inheriting one.
     func testWindowUsesTheRequestedContentSize() throws {
