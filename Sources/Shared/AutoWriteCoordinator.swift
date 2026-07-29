@@ -12,16 +12,32 @@ import Foundation
 /// queueing XPC retries that supersede each other's callbacks.
 ///
 /// So the claim spans the whole write — `issued` until `resolved` — and a
-/// resolution does *not* reopen writing in the same turn. Only `clear()` does,
-/// and every poll tick calls it, as does every reconcile the user just drove.
-/// Two properties fall out, and both are what make this safe to hold across an
+/// resolution does *not* reopen writing in the same turn.
+///
+/// Recovery is a poll tick, but a tick cannot simply drop the claim: it carries
+/// no evidence that the request it would drop is finished. A tick landing a
+/// moment after a dispatch would otherwise send a second write while the first
+/// is still alive. So `advanceTick()` retires a claim over *two* ticks — an
+/// outstanding write loses this tick's attempt and only reopens on the next one
+/// — which gives the two properties that make a claim safe to hold across an
 /// async boundary:
 ///
-/// - A retry is never more than one tick away, so a resolution that defers is
-///   never a resolution that gives up.
-/// - A claim that never resolves cannot wedge the feature. A superseded helper
-///   reply is simply dropped — it never resolves anything — and the next tick
-///   clears the claim regardless.
+/// - A concluded write always gets another attempt, one tick later.
+/// - A claim that never concludes cannot wedge the feature: worst case two ticks
+///   pass and writing reopens on the assumption the reply was lost.
+///
+/// That second property is only safe because the reply is bounded. The helper
+/// call resolves within its own timeout whether or not the daemon answers — the
+/// deadline is armed unconditionally alongside the request — and that bound is
+/// several times shorter than the poll interval. So by the tick that demotes a
+/// claim, its callback has already run; reopening a tick after *that* cannot
+/// dispatch alongside a pending one. (The timeout settles the callback, not the
+/// message: a daemon that eventually processes a timed-out request is the
+/// existing failure path's problem, and writing the flag is idempotent.)
+///
+/// `clear()` is the deliberate exception, for when something genuinely takes the
+/// flag away from auto mode — a user-driven reconcile, or a write from another
+/// origin. Those supersede the outstanding reply rather than racing it.
 public struct AutoWriteCoordinator: Equatable {
     public enum State: Equatable {
         /// Nothing outstanding — auto mode may write.
@@ -60,17 +76,40 @@ public struct AutoWriteCoordinator: Equatable {
     /// caller's business, not this type's.
     ///
     /// Ignored unless a write is actually outstanding, so a late reply that lost
-    /// its claim to `clear()` can't retroactively defer a fresh one.
+    /// its claim — to `clear()`, or to a tick that already demoted it — can't
+    /// retroactively defer a fresh claim or reopen a deferral early.
     public mutating func resolved() {
         guard case .inFlight = state else { return }
         state = .deferred
     }
 
-    /// Drop any claim and allow a write immediately. Called at the top of every
-    /// poll tick, by the reconcile paths the user just drove (where waiting a
-    /// tick would read as broken), and when a write from another origin takes
-    /// over — that write owns the flag now, and auto mode's pending reply, if one
-    /// is still in flight, will be rejected as superseded.
+    /// A new poll tick began.
+    ///
+    /// A concluded write reopens here — that is the retry. An *outstanding* one
+    /// does not: the tick boundary says nothing about whether the request is
+    /// finished, and reopening on it would dispatch a second write alongside a
+    /// live first. It is demoted instead, so it forfeits this tick's attempt and
+    /// reopens on the next — the point by which a reply that was coming would
+    /// have come, and a lost one can be written off.
+    public mutating func advanceTick() {
+        switch state {
+        case .idle:
+            break
+        case .inFlight:
+            state = .deferred
+        case .deferred:
+            state = .idle
+        }
+    }
+
+    /// Drop any claim and allow a write immediately, superseding whatever is
+    /// outstanding. Only for the paths that genuinely take the flag away from
+    /// auto mode: a reconcile the user just drove, and a write from another
+    /// origin. In both cases auto mode's pending reply, if one is still in
+    /// flight, is rejected as superseded rather than raced.
+    ///
+    /// Not for the poll tick — see `advanceTick()`, which exists because a tick
+    /// has no such authority over a live request.
     public mutating func clear() {
         state = .idle
     }

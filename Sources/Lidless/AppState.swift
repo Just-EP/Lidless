@@ -524,8 +524,8 @@ final class AppState: ObservableObject {
         if StateReconciler.clearsExternalNotice(origin) { externalNotice = nil }
         // Any other origin takes the flag away from auto mode: its claim is void
         // and its reply, if one is still in flight, will be rejected as superseded
-        // below. Leaving the claim standing would wedge auto mode until the next
-        // tick on a reply that is never coming.
+        // below. Leaving the claim standing would stall auto mode for a tick or
+        // two on a reply that is never coming.
         if origin != .auto { autoWrite.clear() }
 
         // Refuse to enable if it would immediately violate the safety policy.
@@ -623,7 +623,7 @@ final class AppState: ObservableObject {
         // matters most for `.mismatch`, where adopting the contradicting state
         // reconciles again: without this, that reconcile would dispatch a fresh
         // write, whose read-back could mismatch in turn, with no bound but the
-        // stack. Deferring costs one tick and cannot loop.
+        // stack. Deferring costs a tick and cannot loop.
         autoWrite.resolved()
         switch outcome {
         case .verified:
@@ -756,10 +756,12 @@ final class AppState: ObservableObject {
         // Backstop for the didBecomeActive observer: catch a helper approval even
         // if the app never lost/regained active state.
         recheckHelper()
-        // A fresh tick releases any claim auto mode is still holding — including
-        // one whose reply was superseded and will never arrive — so a deferred or
-        // abandoned write always gets another chance here and nowhere earlier.
-        autoWrite.clear()
+        // Advance auto mode's write claim. A concluded write reopens here — this
+        // is where its retry comes from. One still outstanding does not: this tick
+        // may be landing moments after the dispatch, and reopening would put a
+        // second write alongside a live first. It reopens a tick later instead,
+        // which also bounds how long a lost reply can hold the feature.
+        autoWrite.advanceTick()
         // Reconcile with the real flag every tick, not only while enabled:
         // polling only when we think it's on would structurally miss the case
         // where it was turned on behind our back.

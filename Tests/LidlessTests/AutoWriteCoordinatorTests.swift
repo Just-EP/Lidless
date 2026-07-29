@@ -59,13 +59,70 @@ final class AutoWriteCoordinatorTests: XCTestCase {
     }
 
     /// A late reply that lost its claim to `clear()` must not retroactively
-    /// defer the tick that replaced it.
+    /// defer the fresh claim that replaced it.
     func testResolutionWithoutAClaimIsIgnored() {
         var c = AutoWriteCoordinator()
         c.issued(target: true)
-        c.clear()                               // next tick took over
+        c.clear()                               // a user write took over
         c.resolved()                            // superseded reply, arriving late
-        XCTAssertTrue(c.mayWrite, "a stale reply must not close a fresh tick's door")
+        XCTAssertTrue(c.mayWrite, "a stale reply must not close a fresh claim's door")
+    }
+
+    // MARK: A tick must not race a live request
+
+    /// The tick timer is indifferent to when the write was dispatched: it can
+    /// land 100ms after one. The helper's own 6s timeout is no help at that
+    /// distance, so the tick must not reopen writing on a claim that may still
+    /// have a live request behind it.
+    func testTickImmediatelyAfterIssueBlocksASecondWrite() {
+        var c = AutoWriteCoordinator()
+        c.issued(target: true)
+
+        c.advanceTick()                         // timer fires moments after dispatch
+        XCTAssertFalse(c.mayWrite, "a tick must not dispatch alongside a live request")
+    }
+
+    /// A reply that never arrives is written off — but only after the write has
+    /// forfeited a tick, by which point the helper's timeout has long since
+    /// fired and there is no live request left to duplicate.
+    func testLostInFlightRecoversOnlyOnTheFollowingTick() {
+        var c = AutoWriteCoordinator()
+        c.issued(target: true)
+
+        c.advanceTick()
+        XCTAssertFalse(c.mayWrite, "first tick forfeits the attempt, it doesn't reopen")
+        XCTAssertEqual(c.state, .deferred)
+
+        c.advanceTick()
+        XCTAssertTrue(c.mayWrite, "the following tick writes the lost reply off")
+    }
+
+    /// A tick demoting a live claim, then that claim's reply finally landing,
+    /// must neither reopen writing early nor re-close what the next tick opens.
+    func testLateResolutionAfterATickTransitionSettlesCorrectly() {
+        var c = AutoWriteCoordinator()
+        c.issued(target: true)
+        c.advanceTick()                         // demoted while still live
+
+        c.resolved()                            // the reply, arriving afterwards
+        XCTAssertEqual(c.state, .deferred, "a late reply must not reopen writing early")
+        XCTAssertFalse(c.mayWrite)
+
+        c.advanceTick()
+        XCTAssertTrue(c.mayWrite, "and must not cost the claim its retry either")
+    }
+
+    /// The mirror case: resolved *before* the tick, so the tick is the retry.
+    /// A second, later reply must not re-close it.
+    func testLateResolutionAfterAReopeningTickDoesNotReclose() {
+        var c = AutoWriteCoordinator()
+        c.issued(target: true)
+        c.resolved()
+        c.advanceTick()                         // deferred → idle, this is the retry
+        XCTAssertTrue(c.mayWrite)
+
+        c.resolved()                            // a duplicate/late reply
+        XCTAssertTrue(c.mayWrite, "a stale reply must not close a reopened claim")
     }
 
     // MARK: Failure and unverified retry on the next tick
@@ -78,8 +135,8 @@ final class AutoWriteCoordinatorTests: XCTestCase {
         c.resolved()
         XCTAssertFalse(c.mayWrite)
 
-        c.clear()                               // tick
-        XCTAssertTrue(c.mayWrite, "a deferred write must get another attempt")
+        c.advanceTick()
+        XCTAssertTrue(c.mayWrite, "a concluded write must get another attempt")
     }
 
     /// The helper reported failure: `recoverStateAfterFailedWrite` resolves, then
@@ -91,22 +148,38 @@ final class AutoWriteCoordinatorTests: XCTestCase {
         c.resolved()                            // before the recovery re-read
         XCTAssertFalse(c.mayWrite, "the recovery read's adopt must not re-attempt")
 
-        c.clear()
+        c.advanceTick()
         XCTAssertTrue(c.mayWrite)
     }
 
-    /// The recovery guarantee: whatever state the claim is in, a tick reopens it.
-    /// This is what makes the claim safe to hold across an async boundary — no
-    /// outcome, and no missing outcome, can wedge the feature.
-    func testEveryStateIsClearedByATick() {
+    /// The full recovery guarantee, stated as a table: no state survives two
+    /// ticks. That bound is what makes a claim safe to hold across an async
+    /// boundary — no outcome, and no missing outcome, can wedge the feature.
+    func testNoStateSurvivesTwoTicks() {
         for state in [AutoWriteCoordinator.State.idle,
                       .inFlight(target: true),
                       .inFlight(target: false),
                       .deferred] {
             var c = AutoWriteCoordinator(state: state)
-            c.clear()
-            XCTAssertTrue(c.mayWrite, "a tick must reopen writing from \(state)")
+            c.advanceTick()
+            c.advanceTick()
+            XCTAssertTrue(c.mayWrite, "two ticks must reopen writing from \(state)")
         }
+    }
+
+    /// And the per-step transitions those two ticks are made of.
+    func testTickTransitions() {
+        var idle = AutoWriteCoordinator(state: .idle)
+        idle.advanceTick()
+        XCTAssertEqual(idle.state, .idle, "idle stays idle")
+
+        var inFlight = AutoWriteCoordinator(state: .inFlight(target: true))
+        inFlight.advanceTick()
+        XCTAssertEqual(inFlight.state, .deferred, "a live claim is demoted, not dropped")
+
+        var deferred = AutoWriteCoordinator(state: .deferred)
+        deferred.advanceTick()
+        XCTAssertEqual(deferred.state, .idle, "a concluded claim reopens")
     }
 
     // MARK: A user write supersedes an auto write
