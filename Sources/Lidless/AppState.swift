@@ -129,6 +129,10 @@ final class AppState: ObservableObject {
         // conditions since lapsed. `refreshState()` above reads the flag
         // synchronously, so `isEnabled` is already the real state to compare
         // against and there's nothing to force.
+        //
+        // Plainly `reconcile()`, not `reconcileNow()`: adopting the state that
+        // read just established may already have dispatched a write, and clearing
+        // that claim here would dispatch a second one for the same decision.
         reconcile()
         batteryTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
@@ -205,7 +209,7 @@ final class AppState: ObservableObject {
                 store.saveArmed(armed)
                 cancelAutoOff()
             }
-            reconcile()
+            reconcileNow()
         } else {
             // Leaving auto mode hands activation back to the user, so the auto-off
             // countdown becomes applicable again — re-arm it if one is configured
@@ -230,7 +234,7 @@ final class AppState: ObservableObject {
     private func setArmed(_ on: Bool) {
         armed = on
         store.saveArmed(on)
-        reconcile()
+        reconcileNow()
     }
 
     /// Auto mode: derive the live keep-awake state from `armed` gated by external
@@ -240,27 +244,35 @@ final class AppState: ObservableObject {
     ///
     /// Refreshes the battery cache first so the decision and the warning list the
     /// popover renders from it are read off the same sample. No-ops when auto mode
-    /// is off or the live state already matches — `origin: .auto` because this
-    /// fires unprompted on the poll timer and must stay silent.
+    /// is off, when the live state already matches, or while an earlier write is
+    /// still outstanding or has already concluded this turn — see `autoWrite`.
+    /// `origin: .auto` because this fires unprompted on the poll timer and must
+    /// stay silent.
     func reconcile() {
-        guard settings.autoEnableWhenCharging, !reconciling else { return }
-        reconciling = true
-        defer { reconciling = false }
+        guard settings.autoEnableWhenCharging, autoWrite.mayWrite else { return }
         refreshBattery()
         guard let target = AutoEnablePolicy.target(armed: armed,
                                                    currentlyEnabled: isEnabled,
                                                    battery: currentBattery,
                                                    thermalSerious: thermalSerious(),
                                                    settings: settings) else { return }
+        autoWrite.issued(target: target)
         setEnabled(target, note: nil, origin: .auto)
     }
 
-    /// Guards against re-entering `reconcile()` from inside its own write. The
-    /// read-back in `setEnabled` is synchronous, so a write that never lands
-    /// resolves as a mismatch, adopts the unchanged state, and would ask us to
-    /// write again — recursing until the stack runs out. One pass per call is
-    /// always enough: the next poll tick retries.
-    private var reconciling = false
+    /// Reconcile now, discarding any deferral left by an earlier write this turn.
+    /// For the paths the user just drove — arming, changing settings — where
+    /// waiting for the next tick would read as the control doing nothing. A write
+    /// still in flight is superseded, which is what the user just asked for.
+    private func reconcileNow() {
+        autoWrite.clear()
+        reconcile()
+    }
+
+    /// The claim on auto mode's outstanding write. Held across the helper's async
+    /// round trip, so a reply that reads back wrong can't immediately provoke
+    /// another write. See `AutoWriteCoordinator`.
+    private var autoWrite = AutoWriteCoordinator()
 
     /// The last-sampled battery state, refreshed by `refreshBattery()`. Shared by
     /// `reconcile()` and `autoWarningReasons` so the two can't disagree.
@@ -441,10 +453,15 @@ final class AppState: ObservableObject {
             case .stillUnverified:
                 break
             case .confirmed:
+                autoWrite.resolved()
                 pendingVerification = nil
                 verificationNotice = nil
                 hasConfirmedState = true
             case .writeMismatch(let actual):
+                // Same ordering rule as `applyVerification`: settle the claim
+                // before adopting, so the reconcile that adopting triggers can't
+                // chase the mismatch with another write in this turn.
+                autoWrite.resolved()
                 pendingVerification = nil
                 verificationNotice = StateReconciler.writeMismatchMessage(actual: actual)
                 hasConfirmedState = true
@@ -505,6 +522,11 @@ final class AppState: ObservableObject {
     /// unnoticed; background callers pass their own origin to stay quiet.
     func setEnabled(_ target: Bool, note: String? = nil, origin: SetOrigin = .user) {
         if StateReconciler.clearsExternalNotice(origin) { externalNotice = nil }
+        // Any other origin takes the flag away from auto mode: its claim is void
+        // and its reply, if one is still in flight, will be rejected as superseded
+        // below. Leaving the claim standing would wedge auto mode until the next
+        // tick on a reply that is never coming.
+        if origin != .auto { autoWrite.clear() }
 
         // Refuse to enable if it would immediately violate the safety policy.
         // Returns before claiming a mutation, so nothing in flight is disturbed.
@@ -517,6 +539,9 @@ final class AppState: ObservableObject {
                 if origin == .user {
                     presentFailureAlert(target: target, message: blocker.blockedMessage)
                 }
+                // Nothing was dispatched, so release the claim rather than holding
+                // it for a write that never happened.
+                if origin == .auto { autoWrite.clear() }
                 return
             }
         }
@@ -574,6 +599,10 @@ final class AppState: ObservableObject {
     /// the flag did move, that was our own failed write, and blaming an external
     /// actor for it would be plainly wrong.
     private func recoverStateAfterFailedWrite() {
+        // Resolve before re-reading: that read can adopt a state and ask auto mode
+        // to reconcile, which must not turn into an immediate second attempt at
+        // the write that just failed.
+        autoWrite.resolved()
         hasConfirmedState = false
         refreshState()
     }
@@ -590,6 +619,12 @@ final class AppState: ObservableObject {
     /// Verification never writes to `lastError`: it keeps its own channel so
     /// clearing a caveat can't wipe a safety note or a helper error.
     private func applyVerification(_ outcome: StateReconciler.VerifyOutcome, target: Bool) {
+        // Whatever the outcome, auto mode's write is over. Resolving up front
+        // matters most for `.mismatch`, where adopting the contradicting state
+        // reconciles again: without this, that reconcile would dispatch a fresh
+        // write, whose read-back could mismatch in turn, with no bound but the
+        // stack. Deferring costs one tick and cannot loop.
+        autoWrite.resolved()
         switch outcome {
         case .verified:
             pendingVerification = nil
@@ -721,6 +756,10 @@ final class AppState: ObservableObject {
         // Backstop for the didBecomeActive observer: catch a helper approval even
         // if the app never lost/regained active state.
         recheckHelper()
+        // A fresh tick releases any claim auto mode is still holding — including
+        // one whose reply was superseded and will never arrive — so a deferred or
+        // abandoned write always gets another chance here and nowhere earlier.
+        autoWrite.clear()
         // Reconcile with the real flag every tick, not only while enabled:
         // polling only when we think it's on would structurally miss the case
         // where it was turned on behind our back.
