@@ -210,6 +210,28 @@ final class AppState: ObservableObject {
                 cancelAutoOff()
             }
             reconcileNow()
+        } else if let pending = autoWrite.inFlightTarget {
+            // Leaving auto mode with a write still travelling. Its target is where
+            // the system is heading, so that's what manual mode inherits — but the
+            // transition has to own that outcome with a write of its own, or the
+            // auto reply lands afterwards and moves the state in a mode the user
+            // has already left.
+            //
+            // Quiet origin deliberately: the user toggled a mode, not the switch,
+            // so a modal about keep-awake would be about a write they never asked
+            // for. It also can't be `.user` for a second reason — that origin
+            // clears `externalNotice`, which this isn't entitled to do.
+            //
+            // The reply to this write runs `updateAutoOff`, and auto mode is off
+            // in `settings` by now, so the countdown arms exactly as manual mode
+            // expects.
+            refreshBattery()
+            let settled = AutoEnablePolicy.handoffToManual(pendingTarget: pending,
+                                                           battery: currentBattery,
+                                                           thermalSerious: thermalSerious(),
+                                                           settings: settings)
+            autoWrite.clear()
+            setEnabled(settled, note: nil, origin: .auto)
         } else {
             // Leaving auto mode hands activation back to the user, so the auto-off
             // countdown becomes applicable again — re-arm it if one is configured
@@ -242,31 +264,51 @@ final class AppState: ObservableObject {
     /// When conditions aren't met the feature stays armed and the popover's
     /// warning explains why it isn't currently active.
     ///
+    /// The poll's entry point. No-ops when auto mode is off, when the effective
+    /// state already matches, or while an earlier write is still outstanding or
+    /// has already concluded this turn — see `autoWrite`. `origin: .auto` because
+    /// this fires unprompted on the timer and must stay silent.
+    func reconcile() { reconcile(userDriven: false) }
+
+    /// Reconcile now on behalf of something the user just did — arming, changing
+    /// settings — where waiting for the next tick would read as the control doing
+    /// nothing.
+    ///
+    /// Unlike the poll, this may write over a request still in flight, because
+    /// the user has since said something newer. It does *not* simply drop the
+    /// claim: dropping it loses the pending target, and the decision is then
+    /// taken against a state the system has already left. Disarming while an
+    /// "on" write is travelling would compare `false` against a still-`false`
+    /// `isEnabled`, conclude there was nothing to do, and leave the earlier write
+    /// to land unopposed — turning keep-awake on moments after the user turned it
+    /// off. Deciding against the effective state instead yields a corrective
+    /// write, which supersedes the old reply and, because the helper serialises,
+    /// lands last.
+    private func reconcileNow() { reconcile(userDriven: true) }
+
+    /// Derive the live keep-awake state from `armed` gated by external power +
+    /// safety, flipping only the live state (never the `armed` intent). When
+    /// conditions aren't met the feature stays armed and the popover's warning
+    /// explains why it isn't currently active.
+    ///
     /// Refreshes the battery cache first so the decision and the warning list the
-    /// popover renders from it are read off the same sample. No-ops when auto mode
-    /// is off, when the live state already matches, or while an earlier write is
-    /// still outstanding or has already concluded this turn — see `autoWrite`.
-    /// `origin: .auto` because this fires unprompted on the poll timer and must
-    /// stay silent.
-    func reconcile() {
-        guard settings.autoEnableWhenCharging, autoWrite.mayWrite else { return }
+    /// popover renders from it are read off the same sample.
+    private func reconcile(userDriven: Bool) {
+        guard settings.autoEnableWhenCharging else { return }
+        guard userDriven || autoWrite.mayWrite else { return }
         refreshBattery()
+        let effective = AutoEnablePolicy.effectiveState(pendingTarget: autoWrite.inFlightTarget,
+                                                        live: isEnabled)
+        // No target means the outstanding write is already heading where we want
+        // it to. Leave the claim standing rather than clearing it — clearing
+        // would let the next tick dispatch a duplicate alongside a live request.
         guard let target = AutoEnablePolicy.target(armed: armed,
-                                                   currentlyEnabled: isEnabled,
+                                                   currentlyEnabled: effective,
                                                    battery: currentBattery,
                                                    thermalSerious: thermalSerious(),
                                                    settings: settings) else { return }
         autoWrite.issued(target: target)
         setEnabled(target, note: nil, origin: .auto)
-    }
-
-    /// Reconcile now, discarding any deferral left by an earlier write this turn.
-    /// For the paths the user just drove — arming, changing settings — where
-    /// waiting for the next tick would read as the control doing nothing. A write
-    /// still in flight is superseded, which is what the user just asked for.
-    private func reconcileNow() {
-        autoWrite.clear()
-        reconcile()
     }
 
     /// The claim on auto mode's outstanding write. Held across the helper's async

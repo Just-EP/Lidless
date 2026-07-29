@@ -139,9 +139,13 @@ public enum AutoEnablePolicy {
     }
 
     /// The live keep-awake state auto mode wants, or `nil` when there's nothing
-    /// to do — auto mode is off, or the live state already matches. Returning
-    /// `nil` for "already correct" keeps the caller from writing the system flag
-    /// on every poll tick.
+    /// to do — auto mode is off, or the state already matches. Returning `nil`
+    /// for "already correct" keeps the caller from writing the system flag on
+    /// every poll tick.
+    ///
+    /// `currentlyEnabled` must be the *effective* state — see `effectiveState`.
+    /// Comparing against the shown state instead is how an intent expressed
+    /// while a write is still travelling gets silently dropped.
     public static func target(armed: Bool,
                               currentlyEnabled: Bool,
                               battery: BatteryInfo,
@@ -152,5 +156,37 @@ public enum AutoEnablePolicy {
                                               thermalSerious: thermalSerious,
                                               settings: settings)
         return shouldBeOn == currentlyEnabled ? nil : shouldBeOn
+    }
+
+    /// Where keep-awake is *heading*: the target of a write still in flight, or
+    /// the shown state when nothing is outstanding.
+    ///
+    /// Every decision has to be taken against this rather than against the shown
+    /// state. A dispatched write hasn't moved `isEnabled` yet — that happens in
+    /// its reply — so a user changing their mind mid-flight would otherwise be
+    /// compared against a state the system has already left, conclude nothing
+    /// needs doing, and let the earlier write land unopposed.
+    public static func effectiveState(pendingTarget: Bool?, live: Bool) -> Bool {
+        pendingTarget ?? live
+    }
+
+    /// Leaving auto mode while a write is still travelling: the state to settle
+    /// on, which the caller must then actually write.
+    ///
+    /// Manual mode inherits where the system was heading, so the starting point
+    /// is the outstanding target. But "on" is only honest while it's still
+    /// allowed — conditions can have lapsed since that write went out — and
+    /// settling on "off" is also what keeps the write unconditional. A write of
+    /// `true` can be refused by the safety check before it claims a mutation,
+    /// which would leave the superseded auto reply free to land after all; a
+    /// write of `false` is never refused.
+    public static func handoffToManual(pendingTarget: Bool,
+                                       battery: BatteryInfo,
+                                       thermalSerious: Bool,
+                                       settings: SafetySettings) -> Bool {
+        guard pendingTarget else { return false }
+        return SafetyEvaluator.reasonToDisable(battery: battery,
+                                               thermalSerious: thermalSerious,
+                                               settings: settings) == nil
     }
 }
