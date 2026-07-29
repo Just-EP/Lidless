@@ -92,11 +92,10 @@ final class HelperManager {
         }
     }
 
-    func getState(completion: @escaping (Bool) -> Void) {
-        callWithTimeout(completion: { ok, _ in completion(ok) }) { proxy, done in
-            proxy.getState { value in done(value, nil) }
-        }
-    }
+    // No `getState` wrapper: the helper's reply is a plain `Bool`, so a failed
+    // `pmset -g` inside the daemon would come back as "off" and there'd be no
+    // way to tell. Reading needs no privileges, so `PowerManager` reads the flag
+    // directly and can report "unknown". The helper is only used to change it.
 
     func heartbeat() {
         remote({ _ in })?.heartbeat { _ in }

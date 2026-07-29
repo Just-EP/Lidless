@@ -26,6 +26,42 @@ final class SharedLogicTests: XCTestCase {
         XCTAssertFalse(PowerParsers.isSleepDisabled(pmsetG: "Currently in use:\n standby 1"))
     }
 
+    // MARK: PowerParsers.sleepDisabled — output that doesn't state the flag
+
+    func testStrictSleepDisabledReadsTheFlag() {
+        XCTAssertEqual(PowerParsers.sleepDisabled(pmsetG: " SleepDisabled        1"), true)
+        XCTAssertEqual(PowerParsers.sleepDisabled(pmsetG: " SleepDisabled        0"), false)
+    }
+
+    /// `pmset` failing usually means empty stdout, which must not read as "off" —
+    /// that would claim the Mac is free to sleep on the strength of no data.
+    func testStrictSleepDisabledIsUnknownWhenOutputIsEmpty() {
+        XCTAssertNil(PowerParsers.sleepDisabled(pmsetG: ""))
+    }
+
+    func testStrictSleepDisabledIsUnknownWhenKeyIsMissing() {
+        XCTAssertNil(PowerParsers.sleepDisabled(pmsetG: "Currently in use:\n standby 1"))
+    }
+
+    func testStrictSleepDisabledIsUnknownWhenValueIsMalformed() {
+        XCTAssertNil(PowerParsers.sleepDisabled(pmsetG: " SleepDisabled        yes"))
+        XCTAssertNil(PowerParsers.sleepDisabled(pmsetG: " SleepDisabled"))
+        XCTAssertNil(PowerParsers.sleepDisabled(pmsetG: " SleepDisabled        "))
+    }
+
+    /// Truncated output — the process died mid-write — states nothing.
+    func testStrictSleepDisabledIsUnknownWhenOutputIsTruncated() {
+        XCTAssertNil(PowerParsers.sleepDisabled(pmsetG: "System-wide power settings:\n Sleep"))
+    }
+
+    /// The lenient wrapper still exists for the helper's `Bool`-only XPC reply,
+    /// and must keep collapsing unknown to false rather than changing behaviour.
+    func testLenientFormCollapsesUnknownToFalse() {
+        XCTAssertFalse(PowerParsers.isSleepDisabled(pmsetG: ""))
+        XCTAssertFalse(PowerParsers.isSleepDisabled(pmsetG: " SleepDisabled        yes"))
+        XCTAssertTrue(PowerParsers.isSleepDisabled(pmsetG: " SleepDisabled        1"))
+    }
+
     // MARK: BatteryParsers
 
     func testBatteryOnAC() {

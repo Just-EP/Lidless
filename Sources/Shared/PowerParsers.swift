@@ -4,18 +4,33 @@ import Foundation
 /// can be unit-tested without touching real power management.
 public enum PowerParsers {
 
-    /// Parse `pmset -g` output and return whether the `SleepDisabled` flag is set.
-    /// The relevant line looks like: ` SleepDisabled        1`
-    public static func isSleepDisabled(pmsetG output: String) -> Bool {
+    /// Parse `pmset -g` output for the `SleepDisabled` flag. The relevant line
+    /// looks like: ` SleepDisabled        1`
+    ///
+    /// Returns nil when the output doesn't actually state the flag — the key is
+    /// absent, or its value is something other than `0`/`1`. Truncated or
+    /// unexpected output must not read as "off": that's a claim the Mac is free
+    /// to sleep, made from data that says nothing of the sort.
+    public static func sleepDisabled(pmsetG output: String) -> Bool? {
         for raw in output.split(separator: "\n") {
             let line = String(raw).lowercased()
             guard line.contains("sleepdisabled") else { continue }
             let remainder = line
                 .replacingOccurrences(of: "sleepdisabled", with: "")
                 .trimmingCharacters(in: .whitespaces)
-            return remainder == "1"
+            switch remainder {
+            case "1": return true
+            case "0": return false
+            default:  return nil
+            }
         }
-        return false
+        return nil
+    }
+
+    /// Lenient form, kept for callers that have no way to act on "unknown" —
+    /// the helper's XPC reply is a plain `Bool`. Prefer `sleepDisabled(pmsetG:)`.
+    public static func isSleepDisabled(pmsetG output: String) -> Bool {
+        sleepDisabled(pmsetG: output) ?? false
     }
 }
 

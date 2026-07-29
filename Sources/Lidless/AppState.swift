@@ -14,6 +14,14 @@ final class AppState: ObservableObject {
     @Published var batteryOnAC = false
     @Published var lastError: String?
 
+    /// Explains a toggle that moved by itself. Its own channel, so an external
+    /// change and a safety pause can both be on screen at once.
+    @Published var externalNotice: String?
+
+    /// Transient status of a write we haven't been able to confirm. Also its own
+    /// channel, so clearing it can't disturb `lastError`.
+    @Published var verificationNotice: String?
+
     /// True when using the privileged helper; false when on the M1 admin-prompt fallback.
     @Published var usingHelper = false
 
@@ -35,7 +43,9 @@ final class AppState: ObservableObject {
     @Published var onboardingComplete = false
 
     private let helper = HelperManager()
-    private let fallback = PowerManager()
+    /// Reads the flag on every path — `pmset -g` needs no privileges — and also
+    /// writes it when the helper isn't installed.
+    private let power = PowerManager()
     private let battery = BatteryMonitor()
     private let store = SettingsStore()
     private let loginItem = LoginItemManager()
@@ -67,6 +77,14 @@ final class AppState: ObservableObject {
     /// Last-known "helper is usable" value, so we can detect it flipping on at
     /// runtime (right after the user approves it) and prompt a restart.
     private var helperWasUsable = false
+    /// True once the system flag has been read successfully this session. Set
+    /// only by a read — a write's success reply is a claim, not a reading, and
+    /// treating it as one would let an unconfirmed write masquerade as drift.
+    private var hasConfirmedState = false
+    /// The write currently awaiting confirmation, if any.
+    private var pendingVerification: PendingVerification?
+    /// Rejects async replies that have been superseded.
+    private var sync = StateSync()
     /// True while the onboarding window is open and not yet completed.
     private var onboardingActive = false
     private var didBecomeActiveObserver: NSObjectProtocol?
@@ -90,7 +108,13 @@ final class AppState: ObservableObject {
         didBecomeActiveObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.recheckHelper() }
+            Task { @MainActor in
+                self?.recheckHelper()
+                // Also re-read the flag: it may have been changed from a Terminal
+                // the user was just in. `recheckHelper` only refreshes on the rare
+                // helper unusable→usable transition.
+                self?.refreshState()
+            }
         }
         // First launch shows onboarding once (persisted so closing it early won't
         // re-nag). A relaunch triggered mid-onboarding resumes the flow instead.
@@ -172,7 +196,7 @@ final class AppState: ObservableObject {
                                                         settings: settings) {
             // Pass the message through so it survives the async helper callback
             // (which would otherwise clear lastError on success).
-            setEnabled(false, note: reason.message)
+            setEnabled(false, note: reason.message, origin: .safety)
         }
     }
 
@@ -291,67 +315,183 @@ final class AppState: ObservableObject {
 
     // MARK: State
 
+    /// Read the real `SleepDisabled` flag and bring the UI into step with it.
+    ///
+    /// Always read directly rather than asking the helper: the XPC reply is a
+    /// plain `Bool`, so a `pmset` failure inside the daemon would arrive as a
+    /// confident "off". Reading needs no privileges, so there's nothing to gain
+    /// by routing it through root — and an unknown stays an unknown.
     func refreshState() {
-        if helperInstalled {
-            helper.getState { [weak self] value in self?.isEnabled = value }
-        } else {
-            isEnabled = fallback.isSleepDisabled()
+        let token = sync.beginRead()
+        applyObserved(power.isSleepDisabled(), token)
+    }
+
+    private func applyObserved(_ observed: Bool?, _ token: StateSync.ReadToken) {
+        guard sync.shouldApply(token) else { return }   // superseded by a newer read or a write
+
+        // A write we haven't confirmed owns the interpretation until it resolves:
+        // a disagreement here is our own write failing to hold, not somebody
+        // else's doing, and mustn't be reported as an external change.
+        if let pending = pendingVerification {
+            switch StateReconciler.resolve(pending, observed: observed) {
+            case .stillUnverified:
+                break
+            case .confirmed:
+                pendingVerification = nil
+                verificationNotice = nil
+                hasConfirmedState = true
+            case .writeMismatch(let actual):
+                pendingVerification = nil
+                verificationNotice = StateReconciler.writeMismatchMessage(actual: actual)
+                hasConfirmedState = true
+                adoptSystemState(actual)
+            }
+            return
+        }
+
+        switch StateReconciler.reconcile(shown: isEnabled,
+                                         hasBaseline: hasConfirmedState,
+                                         observed: observed) {
+        case .unknown:
+            break                                       // keep the last-known state
+        case .inSync:
+            hasConfirmedState = true                    // no side effects, by construction
+        case .adopt(let enabled):
+            hasConfirmedState = true
+            adoptSystemState(enabled)
+        case .drift(let change):
+            hasConfirmedState = true
+            // Set before adopting: adopting `true` can synchronously trip a safety
+            // pause, and the notice should already be in place when it does.
+            externalNotice = change.message
+            adoptSystemState(change.nowEnabled)
         }
     }
 
-    /// User flipped the toggle: treat it as user-initiated so any failure or
-    /// refusal surfaces a visible alert (not just the easy-to-miss inline note).
-    func toggle() { setEnabled(!isEnabled, userInitiated: true) }
+    /// Bring `isEnabled` in line with reality *without* touching the flag, running
+    /// the side effects `setEnabled` would have run for this state.
+    ///
+    /// Only ever reached for a real transition — `reconcile` returns `.inSync`
+    /// when the values already agree — so the 30-second poll can't re-arm the
+    /// auto-off timer or restart the heartbeat on every pass.
+    private func adoptSystemState(_ enabled: Bool) {
+        isEnabled = enabled
+        sync.beginMutation()            // supersede every read and write still in flight
+        manageHeartbeat()
+        updateAutoOff(for: enabled)
+        if enabled { evaluateSafety() }
+    }
+
+    /// User flipped the toggle: `.user` origin so any failure or refusal surfaces
+    /// a visible alert (not just the easy-to-miss inline note).
+    func toggle() { setEnabled(!isEnabled, origin: .user) }
 
     /// Set keep-awake. `note` is shown to the user on a successful change
     /// (used when an auto-pause or the auto-off timer disables it); nil clears
-    /// any prior message. When `userInitiated` is true (the user flipped the
-    /// toggle), a failure or policy refusal also pops a blocking alert so it
-    /// can't go unnoticed; background callers leave it false to stay quiet.
-    func setEnabled(_ target: Bool, note: String? = nil, userInitiated: Bool = false) {
+    /// any prior message. When `origin` is `.user` (the user flipped the toggle),
+    /// a failure or policy refusal also pops a blocking alert so it can't go
+    /// unnoticed; background callers pass their own origin to stay quiet.
+    func setEnabled(_ target: Bool, note: String? = nil, origin: SetOrigin = .user) {
+        if StateReconciler.clearsExternalNotice(origin) { externalNotice = nil }
+
         // Refuse to enable if it would immediately violate the safety policy.
+        // Returns before claiming a mutation, so nothing in flight is disturbed.
         if target {
             let info = battery.read()
             if let blocker = SafetyEvaluator.reasonToDisable(battery: info,
                                                              thermalSerious: thermalSerious(),
                                                              settings: settings) {
                 lastError = blocker.message
-                if userInitiated {
+                if origin == .user {
                     presentFailureAlert(target: target, message: blocker.blockedMessage)
                 }
                 return
             }
         }
         let resultMessage = note
+
+        // A new write supersedes any older one, along with its pending verification.
+        pendingVerification = nil
+        verificationNotice = nil
+        let token = sync.beginMutation()
+
         if helperInstalled {
             helper.setKeepAwake(target) { [weak self] ok, err in
-                guard let self else { return }
+                guard let self, self.sync.shouldApply(token) else { return }   // superseded write
                 if ok {
                     self.isEnabled = target
                     self.lastError = resultMessage
                     self.manageHeartbeat()
                     self.updateAutoOff(for: target)
+                    // Deliberately not `hasConfirmedState`: the helper's success
+                    // reply is a claim about the flag, not a reading of it.
+                    self.pendingVerification = PendingVerification(target: target)
+                    self.verifySetApplied(target: target)
                 } else {
                     // The helper can fail without a message (e.g. a dropped XPC
                     // reply, or the daemon failing to launch after an update);
                     // surface it instead of letting the toggle silently no-op.
                     let message = err ?? "The background helper didn’t respond."
                     self.lastError = message
-                    if userInitiated { self.presentHelperFailureAlert(message: message) }
-                    self.refreshState()
+                    if origin == .user { self.presentHelperFailureAlert(message: message) }
+                    self.recoverStateAfterFailedWrite()
                 }
             }
         } else {
             do {
-                try fallback.setSleepDisabled(target)
+                try power.setSleepDisabled(target)
                 isEnabled = target
                 lastError = resultMessage
                 updateAutoOff(for: target)
+                pendingVerification = PendingVerification(target: target)
+                verifySetApplied(target: target)
             } catch {
                 lastError = error.localizedDescription
-                if userInitiated { presentFailureAlert(target: target, message: error.localizedDescription) }
-                isEnabled = fallback.isSleepDisabled()
+                if origin == .user { presentFailureAlert(target: target, message: error.localizedDescription) }
+                recoverStateAfterFailedWrite()
             }
+        }
+    }
+
+    /// After a write that reported failure we know nothing reliable about the
+    /// flag — the write may still have landed. Go re-read it through the normal
+    /// reconcile path rather than assigning `isEnabled` directly, so the token,
+    /// baseline, and side effects all stay consistent.
+    ///
+    /// The baseline is dropped first so that read re-establishes it silently: if
+    /// the flag did move, that was our own failed write, and blaming an external
+    /// actor for it would be plainly wrong.
+    private func recoverStateAfterFailedWrite() {
+        hasConfirmedState = false
+        refreshState()
+    }
+
+    /// The write reported success — read the flag back to see whether it landed.
+    private func verifySetApplied(target: Bool) {
+        let token = sync.beginRead()
+        let observed = power.isSleepDisabled()
+        guard sync.shouldApply(token) else { return }
+        applyVerification(StateReconciler.verifyAfterSet(target: target, observed: observed),
+                          target: target)
+    }
+
+    /// Verification never writes to `lastError`: it keeps its own channel so
+    /// clearing a caveat can't wipe a safety note or a helper error.
+    private func applyVerification(_ outcome: StateReconciler.VerifyOutcome, target: Bool) {
+        switch outcome {
+        case .verified:
+            pendingVerification = nil
+            verificationNotice = nil
+            hasConfirmedState = true
+        case .unverified:
+            // Keep `pendingVerification` — the next poll resolves it, and until
+            // then the UI says plainly that the state isn't confirmed.
+            verificationNotice = StateReconciler.unverifiedMessage(target: target)
+        case .mismatch(let actual):
+            pendingVerification = nil
+            verificationNotice = StateReconciler.writeMismatchMessage(actual: actual)
+            hasConfirmedState = true
+            adoptSystemState(actual)
         }
     }
 
@@ -448,7 +588,9 @@ final class AppState: ObservableObject {
         if AutoOff.isExpired(deadline: deadline, now: Date()) {
             let minutes = autoOffMinutes
             cancelAutoOff()
-            setEnabled(false, note: "Auto-off: \(AutoOff.optionLabel(minutes: minutes)) elapsed.")
+            setEnabled(false,
+                       note: "Auto-off: \(AutoOff.optionLabel(minutes: minutes)) elapsed.",
+                       origin: .autoOff)
         } else {
             refreshAutoOffRemaining()
         }
@@ -465,6 +607,10 @@ final class AppState: ObservableObject {
         // Backstop for the didBecomeActive observer: catch a helper approval even
         // if the app never lost/regained active state.
         recheckHelper()
+        // Reconcile with the real flag every tick, not only while enabled:
+        // polling only when we think it's on would structurally miss the case
+        // where it was turned on behind our back.
+        refreshState()
         refreshBattery()
         evaluateSafety()
     }
