@@ -57,8 +57,8 @@ final class AutoPendingWriteTests: XCTestCase {
     /// auto reply, so the state can't move afterwards in a mode that's gone.
     func testDisablingAutoModeSettlesOnThePendingTarget() {
         XCTAssertTrue(AutoEnablePolicy.handoffToManual(
-            pendingTarget: true, battery: onPower,
-            thermalSerious: false, settings: auto))
+            pendingTarget: true, conditions: SafetySnapshot(battery: onPower, thermalSerious: false),
+            settings: auto))
     }
 
     /// Inheriting "on" is only honest while it's still allowed. Unplugged with a
@@ -69,19 +69,19 @@ final class AutoPendingWriteTests: XCTestCase {
         var s = auto
         s.lowBatteryThreshold = 90                          // 80% is at/below it
         XCTAssertFalse(AutoEnablePolicy.handoffToManual(
-            pendingTarget: true, battery: offPower,
-            thermalSerious: false, settings: s))
+            pendingTarget: true, conditions: SafetySnapshot(battery: offPower, thermalSerious: false),
+            settings: s))
 
         XCTAssertFalse(AutoEnablePolicy.handoffToManual(
-            pendingTarget: true, battery: onPower,
-            thermalSerious: true, settings: auto), "running hot blocks the inheritance too")
+            pendingTarget: true, conditions: SafetySnapshot(battery: onPower, thermalSerious: true),
+            settings: auto), "running hot blocks the inheritance too")
     }
 
     /// A pending "off" settles off, and never trips the refusal path.
     func testDisablingAutoModeDuringAPendingOffSettlesOff() {
         XCTAssertFalse(AutoEnablePolicy.handoffToManual(
-            pendingTarget: false, battery: onPower,
-            thermalSerious: false, settings: auto))
+            pendingTarget: false, conditions: SafetySnapshot(battery: onPower, thermalSerious: false),
+            settings: auto))
     }
 
     // MARK: 3 — pending ON + a change that still wants ON ⇒ no duplicate
@@ -138,5 +138,103 @@ final class AutoPendingWriteTests: XCTestCase {
 
         // …time passes, the stale reply finally arrives…
         XCTAssertFalse(sync.shouldApply(stale))
+    }
+
+    // MARK: 5 — the decision/write seam
+
+    /// Conditions moving between deciding and writing is what the snapshot is
+    /// for. Decided while plugged in, the "on" write is permitted; re-sampled a
+    /// moment later on battery below the cutoff, the very same write is refused —
+    /// and a refusal claims no mutation, so it supersedes nothing.
+    func testResamplingAcrossTheSeamWouldRefuseAWriteTheDecisionAllowed() {
+        var s = auto
+        s.lowBatteryThreshold = 90
+
+        let decided = SafetySnapshot(battery: onPower, thermalSerious: false)
+        XCTAssertTrue(AutoEnablePolicy.writeIsPermitted(target: true, conditions: decided, settings: s),
+                      "the decision was taken on power, where 'on' is allowed")
+
+        let resampled = SafetySnapshot(battery: offPower, thermalSerious: false)
+        XCTAssertFalse(AutoEnablePolicy.writeIsPermitted(target: true, conditions: resampled, settings: s),
+                       "re-reading a moment later can refuse the write the decision authorised")
+    }
+
+    /// So the write is checked against the snapshot it was decided from, which
+    /// makes "decided allowed ⇒ not refused" hold by construction.
+    func testAWriteDecidedFromASnapshotIsPermittedUnderThatSnapshot() {
+        var decisions = 0
+        for onAC in [true, false] {
+            for percent in [0, 15, 50, 100] {
+                for hot in [true, false] {
+                    for threshold in [0, 20, 90] {
+                        var s = auto
+                        s.lowBatteryThreshold = threshold
+                        let conditions = SafetySnapshot(
+                            battery: BatteryInfo(percent: percent, onAC: onAC),
+                            thermalSerious: hot)
+
+                        guard let target = AutoEnablePolicy.target(
+                            armed: true, currentlyEnabled: false,
+                            battery: conditions.battery,
+                            thermalSerious: conditions.thermalSerious,
+                            settings: s) else { continue }
+
+                        decisions += 1
+                        XCTAssertTrue(
+                            AutoEnablePolicy.writeIsPermitted(target: target,
+                                                              conditions: conditions,
+                                                              settings: s),
+                            "decided \(target) from \(conditions) but the write would be refused")
+                    }
+                }
+            }
+        }
+        XCTAssertGreaterThan(decisions, 0, "the `continue` must not have skipped every case")
+    }
+
+    /// The same guarantee for the handoff, which is where a refusal would be
+    /// worst: it settles the mode transition, so a write that never claims a
+    /// mutation leaves the auto reply free to land afterwards.
+    func testEveryHandoffDecisionYieldsAPermittedWrite() {
+        for pending in [true, false] {
+            for onAC in [true, false] {
+                for hot in [true, false] {
+                    for threshold in [0, 20, 90] {
+                        var s = auto
+                        s.lowBatteryThreshold = threshold
+                        let conditions = SafetySnapshot(
+                            battery: BatteryInfo(percent: 15, onAC: onAC),
+                            thermalSerious: hot)
+
+                        let settled = AutoEnablePolicy.handoffToManual(
+                            pendingTarget: pending, conditions: conditions, settings: s)
+
+                        XCTAssertTrue(
+                            AutoEnablePolicy.writeIsPermitted(target: settled,
+                                                              conditions: conditions,
+                                                              settings: s),
+                            "handoff settled on \(settled) from \(conditions) but would be refused")
+                    }
+                }
+            }
+        }
+    }
+
+    /// And the property the corrective "off" leans on, stated on its own: an
+    /// "off" write is permitted under any conditions whatsoever, so it can always
+    /// claim its mutation and supersede a pending "on".
+    func testAnOffWriteIsNeverRefused() {
+        for onAC in [true, false] {
+            for hot in [true, false] {
+                for threshold in [0, 50] {
+                    var s = auto
+                    s.lowBatteryThreshold = threshold
+                    let conditions = SafetySnapshot(
+                        battery: BatteryInfo(percent: 5, onAC: onAC), thermalSerious: hot)
+                    XCTAssertTrue(AutoEnablePolicy.writeIsPermitted(
+                        target: false, conditions: conditions, settings: s))
+                }
+            }
+        }
     }
 }

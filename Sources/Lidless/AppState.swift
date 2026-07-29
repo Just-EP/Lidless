@@ -226,12 +226,16 @@ final class AppState: ObservableObject {
             // in `settings` by now, so the countdown arms exactly as manual mode
             // expects.
             refreshBattery()
+            let conditions = SafetySnapshot(battery: currentBattery,
+                                            thermalSerious: thermalSerious())
             let settled = AutoEnablePolicy.handoffToManual(pendingTarget: pending,
-                                                           battery: currentBattery,
-                                                           thermalSerious: thermalSerious(),
+                                                           conditions: conditions,
                                                            settings: settings)
             autoWrite.clear()
-            setEnabled(settled, note: nil, origin: .auto)
+            // Same snapshot to decide and to write: whichever way `settled` went,
+            // the check on the way out is guaranteed to permit it, so this write
+            // always claims a mutation and always supersedes the auto reply.
+            setEnabled(settled, note: nil, origin: .auto, conditions: conditions)
         } else {
             // Leaving auto mode hands activation back to the user, so the auto-off
             // countdown becomes applicable again — re-arm it if one is configured
@@ -297,6 +301,12 @@ final class AppState: ObservableObject {
         guard settings.autoEnableWhenCharging else { return }
         guard userDriven || autoWrite.mayWrite else { return }
         refreshBattery()
+        // One sample, used to decide *and* handed to the write, so the check on
+        // the way out can't disagree with the decision that authorised it. A
+        // disagreement there would be a refusal, and a refusal claims no mutation
+        // — leaving a superseded write in force.
+        let conditions = SafetySnapshot(battery: currentBattery,
+                                        thermalSerious: thermalSerious())
         let effective = AutoEnablePolicy.effectiveState(pendingTarget: autoWrite.inFlightTarget,
                                                         live: isEnabled)
         // No target means the outstanding write is already heading where we want
@@ -304,11 +314,11 @@ final class AppState: ObservableObject {
         // would let the next tick dispatch a duplicate alongside a live request.
         guard let target = AutoEnablePolicy.target(armed: armed,
                                                    currentlyEnabled: effective,
-                                                   battery: currentBattery,
-                                                   thermalSerious: thermalSerious(),
+                                                   battery: conditions.battery,
+                                                   thermalSerious: conditions.thermalSerious,
                                                    settings: settings) else { return }
         autoWrite.issued(target: target)
-        setEnabled(target, note: nil, origin: .auto)
+        setEnabled(target, note: nil, origin: .auto, conditions: conditions)
     }
 
     /// The claim on auto mode's outstanding write. Held across the helper's async
@@ -562,7 +572,16 @@ final class AppState: ObservableObject {
     /// any prior message. When `origin` is `.user` (the user flipped the toggle),
     /// a failure or policy refusal also pops a blocking alert so it can't go
     /// unnoticed; background callers pass their own origin to stay quiet.
-    func setEnabled(_ target: Bool, note: String? = nil, origin: SetOrigin = .user) {
+    /// `conditions` is the sample a caller already made its decision from. The
+    /// safety check below still runs — this is not a bypass — but it runs against
+    /// those conditions rather than a fresh reading, so a decision and the write
+    /// it authorises can't be judged against different worlds. Callers that have
+    /// no decision to be consistent with (the user flipping the switch) omit it
+    /// and get the fresh reading, which is what they want.
+    func setEnabled(_ target: Bool,
+                    note: String? = nil,
+                    origin: SetOrigin = .user,
+                    conditions: SafetySnapshot? = nil) {
         if StateReconciler.clearsExternalNotice(origin) { externalNotice = nil }
         // Any other origin takes the flag away from auto mode: its claim is void
         // and its reply, if one is still in flight, will be rejected as superseded
@@ -571,11 +590,14 @@ final class AppState: ObservableObject {
         if origin != .auto { autoWrite.clear() }
 
         // Refuse to enable if it would immediately violate the safety policy.
-        // Returns before claiming a mutation, so nothing in flight is disturbed.
+        // Returns before claiming a mutation, so nothing in flight is disturbed —
+        // which is exactly why a caller correcting an outstanding write must pass
+        // the conditions it decided from: a refusal here supersedes nothing.
         if target {
-            let info = battery.read()
-            if let blocker = SafetyEvaluator.reasonToDisable(battery: info,
-                                                             thermalSerious: thermalSerious(),
+            let checked = conditions ?? SafetySnapshot(battery: battery.read(),
+                                                       thermalSerious: thermalSerious())
+            if let blocker = SafetyEvaluator.reasonToDisable(battery: checked.battery,
+                                                             thermalSerious: checked.thermalSerious,
                                                              settings: settings) {
                 lastError = blocker.message
                 if origin == .user {

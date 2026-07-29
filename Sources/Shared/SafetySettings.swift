@@ -68,6 +68,23 @@ public enum SafetyReason: Equatable {
     }
 }
 
+/// One sample of everything a safety decision reads from the world.
+///
+/// Exists so a decision and the write it authorises can be judged against the
+/// same conditions. Sampling twice — once to decide, once to check on the way
+/// out — puts a seam between them that the world can change across, and a write
+/// refused at that seam is a write that never claimed a mutation, so it
+/// supersedes nothing and leaves whatever it was correcting in force.
+public struct SafetySnapshot: Equatable {
+    public let battery: BatteryInfo
+    public let thermalSerious: Bool
+
+    public init(battery: BatteryInfo, thermalSerious: Bool) {
+        self.battery = battery
+        self.thermalSerious = thermalSerious
+    }
+}
+
 /// Pure safety decision. No side effects, fully unit-testable.
 public enum SafetyEvaluator {
     /// The reason keep-awake should be disabled given current conditions, or
@@ -181,12 +198,30 @@ public enum AutoEnablePolicy {
     /// which would leave the superseded auto reply free to land after all; a
     /// write of `false` is never refused.
     public static func handoffToManual(pendingTarget: Bool,
-                                       battery: BatteryInfo,
-                                       thermalSerious: Bool,
+                                       conditions: SafetySnapshot,
                                        settings: SafetySettings) -> Bool {
         guard pendingTarget else { return false }
-        return SafetyEvaluator.reasonToDisable(battery: battery,
-                                               thermalSerious: thermalSerious,
+        return writeIsPermitted(target: true, conditions: conditions, settings: settings)
+    }
+
+    /// Whether the safety check on the way out of `setEnabled` will let a write
+    /// of `target` through, given the conditions it checks against.
+    ///
+    /// This mirrors that check exactly, so a caller can guarantee its write won't
+    /// be refused by handing the same snapshot to both. Two properties follow,
+    /// and the auto path depends on each:
+    ///
+    /// - A `false` target is never refused. That is what lets a corrective "off"
+    ///   supersede a pending "on" under any conditions at all.
+    /// - A `true` target decided from a snapshot is still permitted under that
+    ///   same snapshot, by construction. Re-sampling instead would reopen the
+    ///   seam this is here to close.
+    public static func writeIsPermitted(target: Bool,
+                                        conditions: SafetySnapshot,
+                                        settings: SafetySettings) -> Bool {
+        guard target else { return true }
+        return SafetyEvaluator.reasonToDisable(battery: conditions.battery,
+                                               thermalSerious: conditions.thermalSerious,
                                                settings: settings) == nil
     }
 }
