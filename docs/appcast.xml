@@ -3,12 +3,12 @@
     <channel>
         <title>Lidless</title>
         <item>
-            <title>0.1.1</title>
-            <pubDate>Mon, 22 Jun 2026 17:27:49 +0700</pubDate>
-            <sparkle:version>48</sparkle:version>
-            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+            <title>0.1.2</title>
+            <pubDate>Sat, 01 Aug 2026 18:36:43 +0700</pubDate>
+            <sparkle:version>66</sparkle:version>
+            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/nghialuong/Lidless/releases/latest/download/Lidless-0.1.1.dmg" length="3571482" type="application/octet-stream" sparkle:edSignature="AWk3L1jj1Tss/ZMbpZoR4wQUOUu2qZKvAoG6Wn7t1kHzuNnPGTbs9lXB+UksOX3fxWxVIbQJ9HIfeywOvTmDBQ=="/>
+            <enclosure url="https://github.com/nghialuong/Lidless/releases/latest/download/Lidless-0.1.2.dmg" length="3625376" type="application/octet-stream" sparkle:edSignature="Heaq2N7fGNQNLZ6OkZVNKTa5RMbqxb6ZEWjLVlQfM66FXhtSuPvUmMU1Ceqr5vvDrGV1uql7FHCznbqTcVTwAg=="/>
         </item>
     </channel>
 </rss>
