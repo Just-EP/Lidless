@@ -32,6 +32,12 @@ struct MenuContent: View {
             PrimaryToggleRow()
                 .padding(.horizontal, hInset)
 
+            if !state.autoWarningReasons.isEmpty {
+                AutoDisabledWarning(reasons: state.autoWarningReasons)
+                    .padding(.horizontal, hInset)
+                    .padding(.bottom, 10)
+            }
+
             Divider()
                 .padding(.horizontal, hInset)
 
@@ -73,6 +79,14 @@ struct MenuContent: View {
                 .padding(.horizontal, hInset)
 
             SafetySection()
+                .padding(.horizontal, hInset)
+                .padding(.top, 12)
+
+            Divider()
+                .padding(.horizontal, hInset)
+                .padding(.top, 12)
+
+            AutomaticSection()
                 .padding(.horizontal, hInset)
                 .padding(.top, 12)
 
@@ -142,8 +156,8 @@ private struct PrimaryToggleRow: View {
                    titleFont: .body.weight(.semibold),
                    minHeight: 42) {
             Toggle("Keep awake with lid closed", isOn: Binding(
-                get: { state.isEnabled },
-                set: { _ in state.toggle() }
+                get: { state.masterToggleOn },
+                set: { state.setMasterToggle($0) }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
@@ -228,18 +242,134 @@ private struct SafetySection: View {
                 .controlSize(.small)
             }
 
-            SettingRow(title: "Low-battery cutoff") {
-                HStack(spacing: 6) {
-                    Text("\(state.settings.lowBatteryThreshold)%")
+            LowBatteryCutoffRow()
+        }
+    }
+}
+
+/// Full-width low-battery cutoff slider (0–100%, snapping in 5% steps). `0` means
+/// "Never" — the low-battery check is disabled entirely.
+private struct LowBatteryCutoffRow: View {
+    @EnvironmentObject var state: AppState
+
+    /// The value shown while dragging. Committing on every step would write
+    /// UserDefaults — and, in auto mode, run a reconcile that can reach the
+    /// privileged helper — once per 5% of travel, so the commit waits for the
+    /// drag to end.
+    @State private var dragging: Double?
+
+    private var threshold: Int { state.settings.lowBatteryThreshold }
+
+    /// The committed value, or the in-flight one while a drag is in progress.
+    private var shown: Int { Int((dragging ?? Double(threshold)).rounded()) }
+
+    /// The cutoff only ever fires off power, so it's meaningless whenever
+    /// keep-awake is already gated on being plugged in — under "Only while
+    /// charging", and equally under auto mode, which requires external power.
+    private var isInactive: Bool {
+        state.settings.onlyWhileCharging || state.settings.autoEnableWhenCharging
+    }
+
+    private var value: Binding<Double> {
+        Binding(get: { dragging ?? Double(threshold) },
+                set: { dragging = $0 })
+    }
+
+    /// Commit the dragged value once the drag ends, and only if it actually moved.
+    private func commit(editing: Bool) {
+        guard !editing, let value = dragging else { return }
+        dragging = nil
+        var updated = state.settings
+        updated.lowBatteryThreshold = Int(value.rounded())
+        guard updated != state.settings else { return }
+        state.updateSettings(updated)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 12) {
+                Text("Low-battery cutoff")
+                    .font(.callout)
+                    .lineLimit(1)
+                Spacer(minLength: 16)
+                Text(shown == 0 ? "Never" : "\(shown)%")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            Slider(value: value,
+                   in: 0...100,
+                   step: 5,
+                   label: { Text("Low-battery cutoff") },
+                   minimumValueLabel: { Text("Never").font(.caption2).foregroundStyle(.secondary) },
+                   maximumValueLabel: { Text("100%").font(.caption2).foregroundStyle(.secondary) },
+                   onEditingChanged: commit)
+            .labelsHidden()
+            .controlSize(.small)
+        }
+        .frame(minHeight: 36)
+        .padding(.vertical, 4)
+        .disabled(isInactive)
+    }
+}
+
+// MARK: - Auto-mode warning
+
+/// Shown directly under the primary toggle when auto mode is armed but keep-awake
+/// isn't live right now, listing every safety check currently blocking it.
+private struct AutoDisabledWarning: View {
+    let reasons: [SafetyReason]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(Color(nsColor: .systemYellow))
+                Text("Automatic mode is on, but keep-awake isn’t active right now.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.callout)
+
+            Text("Temporarily disabled because the following check(s) failed:")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(reasons.enumerated()), id: \.offset) { _, reason in
+                    Text("• \(reason.checkLabel)")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                    Stepper("Low-battery cutoff", value: Binding(
-                        get: { state.settings.lowBatteryThreshold },
-                        set: { v in var s = state.settings; s.lowBatteryThreshold = v; state.updateSettings(s) }
-                    ), in: 5...50, step: 5)
-                    .labelsHidden()
-                    .controlSize(.small)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            .padding(.leading, 4)
+        }
+    }
+}
+
+// MARK: - Automatic
+
+private struct AutomaticSection: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Automatic")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 2)
+
+            SettingRow(title: "Automatically enable when charging") {
+                Toggle("Automatically enable when charging", isOn: Binding(
+                    get: { state.settings.autoEnableWhenCharging },
+                    set: { v in var s = state.settings; s.autoEnableWhenCharging = v; state.updateSettings(s) }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
             }
         }
     }

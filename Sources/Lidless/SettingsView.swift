@@ -58,7 +58,16 @@ struct SettingsView: View {
                     LabeledContent("Turning off in", value: state.autoOffRemaining)
                         .foregroundStyle(.secondary)
                 }
+                // Auto mode decides activation on its own, so a countdown would
+                // disarm the feature out from under it. Say so rather than letting
+                // the picker look live while doing nothing.
+                if state.settings.autoEnableWhenCharging {
+                    Text("Not used while “Automatically enable when charging” is on.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .disabled(state.settings.autoEnableWhenCharging)
 
             Section("Updates") {
                 Toggle("Check for updates automatically", isOn: $updater.automaticallyChecksForUpdates)

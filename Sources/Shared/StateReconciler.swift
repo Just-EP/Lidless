@@ -27,6 +27,12 @@ public enum SetOrigin: Equatable {
     case safety
     /// The auto-off timer elapsed.
     case autoOff
+    /// Auto-enable mode deriving the live state from the armed intent — including
+    /// the write that settles its last outstanding one as the user leaves the
+    /// mode. Distinct from `.safety` because this origin can turn keep-awake *on*
+    /// as well as off, and it isn't the user acting on the switch — so it must
+    /// never present an alert or disturb a notice they haven't seen yet.
+    case auto
 }
 
 /// A write whose read-back hasn't confirmed it yet.
