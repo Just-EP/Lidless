@@ -26,9 +26,30 @@ enum MenuBarExtraPanel {
         className.contains("NSStatusBarWindow")
     }
 
+    /// Which window `dismiss` would fall back to closing, given the class names
+    /// of the app's windows in order — or nil when none of them is the panel.
+    ///
+    /// Pulled out as a pure function so the selection can be tested against
+    /// arbitrary window lists. The alternative is standing up real `NSWindow`s
+    /// in a test, which drags in window-server availability and AppKit's
+    /// release-on-close lifecycle — neither of which has anything to do with
+    /// the thing worth checking, which is that only the panel is ever picked.
+    static func panelWindowIndex(classNames: [String]) -> Int? {
+        classNames.firstIndex { isPanelWindow(className: $0) }
+    }
+
+    /// Class names of the status-bar windows to try, in order.
+    static func statusBarWindowIndices(classNames: [String]) -> [Int] {
+        classNames.indices.filter { isStatusBarWindow(className: classNames[$0]) }
+    }
+
     /// Close the popover if it's open. No-op when it isn't.
     static func dismiss() {
-        for window in NSApp.windows where isStatusBarWindow(className: window.className) {
+        dismiss(windows: NSApp.windows)
+    }
+
+    static func dismiss(windows: [NSWindow]) {
+        for window in windows where isStatusBarWindow(className: window.className) {
             // `statusItem` is a private property. Ask before reading it: a bare
             // value(forKey:) raises an uncatchable ObjC exception if it's gone.
             guard window.responds(to: NSSelectorFromString("statusItem")),
@@ -44,6 +65,8 @@ enum MenuBarExtraPanel {
 
         // If that shape ever changes, close the panel directly. The icon stays
         // highlighted until the next click, which beats a popover that won't go.
-        NSApp.windows.first { isPanelWindow(className: $0.className) }?.close()
+        if let index = panelWindowIndex(classNames: windows.map(\.className)) {
+            windows[index].close()
+        }
     }
 }

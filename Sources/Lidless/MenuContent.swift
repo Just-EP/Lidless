@@ -32,6 +32,9 @@ struct MenuContent: View {
             PrimaryToggleRow()
                 .padding(.horizontal, hInset)
 
+            KeepAwakeDurationRow()
+                .padding(.horizontal, hInset)
+
             if !state.autoWarningReasons.isEmpty {
                 AutoDisabledWarning(reasons: state.autoWarningReasons)
                     .padding(.horizontal, hInset)
@@ -164,6 +167,58 @@ private struct PrimaryToggleRow: View {
             .controlSize(.regular)
             .tint(.accentColor)
         }
+    }
+}
+
+// MARK: - Keep-awake duration
+
+/// "Keep awake for 15 minutes" as a single gesture: picking a duration turns
+/// keep-awake on and starts the countdown that turns it back off.
+///
+/// Sits directly under the toggle because it modifies it — this is how long the
+/// switch above stays on, not a setting that lives somewhere else.
+private struct KeepAwakeDurationRow: View {
+    @EnvironmentObject var state: AppState
+
+    private var autoMode: Bool { state.settings.autoEnableWhenCharging }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            SettingRow(title: "Keep awake for", minHeight: 32) {
+                // A Menu of buttons rather than a Picker: a Picker's binding only
+                // fires when the value *changes*, so after a timer had elapsed,
+                // choosing the same duration again would do nothing at all —
+                // exactly when someone wants another fifteen minutes.
+                Menu {
+                    Button(AutoOff.durationLabel(minutes: 0)) { state.keepAwakeFor(minutes: 0) }
+                    ForEach(AutoOff.presetMinutes, id: \.self) { minutes in
+                        Button(AutoOff.optionLabel(minutes: minutes)) {
+                            state.keepAwakeFor(minutes: minutes)
+                        }
+                    }
+                } label: {
+                    Text(AutoOff.durationLabel(minutes: state.autoOffMinutes))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(autoMode)
+            }
+
+            if !state.autoOffRemaining.isEmpty {
+                Label("Turning off in \(state.autoOffRemaining)", systemImage: "timer")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else if autoMode {
+                // Auto mode decides activation itself, so a countdown would
+                // disarm the feature behind its back. Say so rather than leaving
+                // a control that looks live and does nothing.
+                Text("Not used while “Automatically enable when charging” is on.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.bottom, 8)
     }
 }
 

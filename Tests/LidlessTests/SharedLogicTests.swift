@@ -145,6 +145,55 @@ final class SharedLogicTests: XCTestCase {
         XCTAssertEqual(AutoOff.formatCountdown(0), "0:00")
     }
 
+    // MARK: AutoOff.request — "keep awake for N minutes" as one gesture
+
+    /// The point of the change: asking for fifteen minutes of keep-awake turns
+    /// keep-awake on. Before, it only armed a countdown for a switch the user
+    /// still had to find and flip themselves.
+    func testRequestEnablesKeepAwakeWhenItIsOff() {
+        XCTAssertEqual(AutoOff.request(minutes: 15, isEnabled: false, autoModeOn: false),
+                       .enableThenArmTimer(minutes: 15))
+    }
+
+    func testRequestJustArmsTimerWhenAlreadyOn() {
+        XCTAssertEqual(AutoOff.request(minutes: 30, isEnabled: true, autoModeOn: false),
+                       .armTimer(minutes: 30))
+    }
+
+    /// "No limit" removes the countdown. It must not also turn keep-awake off —
+    /// that's a different request, and the master toggle already expresses it.
+    func testRequestForNoLimitCancelsTimerWithoutDisabling() {
+        XCTAssertEqual(AutoOff.request(minutes: 0, isEnabled: true, autoModeOn: false),
+                       .cancelTimer)
+        XCTAssertEqual(AutoOff.request(minutes: 0, isEnabled: false, autoModeOn: false),
+                       .cancelTimer)
+    }
+
+    /// Auto mode owns activation; a countdown there would disarm the feature
+    /// behind its back. Nothing happens, including no persisted change.
+    func testRequestIsIgnoredInAutoModeWhateverElseIsTrue() {
+        for minutes in [0, 15, 240] {
+            for enabled in [true, false] {
+                XCTAssertEqual(AutoOff.request(minutes: minutes, isEnabled: enabled, autoModeOn: true),
+                               .ignoredInAutoMode,
+                               "minutes=\(minutes) enabled=\(enabled)")
+            }
+        }
+    }
+
+    func testRequestCoversEveryPreset() {
+        for minutes in AutoOff.presetMinutes {
+            XCTAssertEqual(AutoOff.request(minutes: minutes, isEnabled: false, autoModeOn: false),
+                           .enableThenArmTimer(minutes: minutes))
+        }
+    }
+
+    func testDurationLabelNamesTheNoLimitCase() {
+        XCTAssertEqual(AutoOff.durationLabel(minutes: 0), "No limit")
+        XCTAssertEqual(AutoOff.durationLabel(minutes: 15), "15 min")
+        XCTAssertEqual(AutoOff.durationLabel(minutes: 60), "1 hour")
+    }
+
     func testAutoOffOptionLabels() {
         XCTAssertEqual(AutoOff.optionLabel(minutes: 15), "15 min")
         XCTAssertEqual(AutoOff.optionLabel(minutes: 30), "30 min")

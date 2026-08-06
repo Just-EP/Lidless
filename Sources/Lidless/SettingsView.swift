@@ -44,30 +44,12 @@ struct SettingsView: View {
                 Text("Background helper")
             }
 
-            Section("Auto-off timer") {
-                Picker("Turn off after", selection: Binding(
-                    get: { state.autoOffMinutes },
-                    set: { state.setAutoOffMinutes($0) }
-                )) {
-                    Text("Never").tag(0)
-                    ForEach(AutoOff.presetMinutes, id: \.self) { m in
-                        Text(AutoOff.optionLabel(minutes: m)).tag(m)
-                    }
-                }
-                if state.isEnabled, !state.autoOffRemaining.isEmpty {
-                    LabeledContent("Turning off in", value: state.autoOffRemaining)
-                        .foregroundStyle(.secondary)
-                }
-                // Auto mode decides activation on its own, so a countdown would
-                // disarm the feature out from under it. Say so rather than letting
-                // the picker look live while doing nothing.
-                if state.settings.autoEnableWhenCharging {
-                    Text("Not used while “Automatically enable when charging” is on.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .disabled(state.settings.autoEnableWhenCharging)
+            // The auto-off timer used to live here as a preference — set a
+            // duration, then separately remember to flip the switch. It's now a
+            // "Keep awake for…" control in the popover next to the toggle it
+            // governs, where choosing a duration also turns keep-awake on. One
+            // concept, one place; a second entry point here would only be a
+            // second thing to keep in step.
 
             Section("Updates") {
                 Toggle("Check for updates automatically", isOn: $updater.automaticallyChecksForUpdates)
