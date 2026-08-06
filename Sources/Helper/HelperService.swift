@@ -3,8 +3,27 @@ import Foundation
 final class HelperListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let service = HelperService()
 
+    /// The app this helper belongs to, recovered from the label launchd started
+    /// us with. The Debug and Release builds run separate daemons under separate
+    /// labels, so each ends up demanding its own app and not the other's.
+    private let appBundleID = LidlessHelper.appBundleID(
+        fromLabel: ProcessInfo.processInfo.environment[LidlessHelper.machLabelEnvKey]
+            ?? LidlessHelper.fallbackLabel
+    )
+
     func listener(_ listener: NSXPCListener,
                   shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
+        // Require the peer be our app before handing it an object that runs as
+        // root. Without this, the check amounts to "did something on this Mac
+        // connect", which every process passes.
+        //
+        // `setCodeSigningRequirement` validates against the peer's audit token
+        // on each message, so it has none of the PID-reuse race that inspecting
+        // `processIdentifier` would. It must be set before `resume()`, and it is
+        // an XPC error to set it twice — hence here, once, on a fresh connection.
+        newConnection.setCodeSigningRequirement(
+            LidlessHelper.codeSigningRequirement(appBundleID: appBundleID)
+        )
         newConnection.exportedInterface = NSXPCInterface(with: LidlessHelperProtocol.self)
         newConnection.exportedObject = service
         newConnection.resume()
