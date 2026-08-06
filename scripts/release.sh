@@ -65,7 +65,16 @@ BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD)}"
 # Guard: refuse to ship a build number that isn't greater than the last shipped
 # one (read from the committed, published feed — the durable source of truth).
 if [ -f "$PAGES_APPCAST" ]; then
-    LAST=$(/usr/bin/sed -n 's/.*sparkle:version="\([0-9][0-9]*\)".*/\1/p' "$PAGES_APPCAST" | sort -n | tail -n1)
+    # Match the element form `<sparkle:version>66</sparkle:version>`, which is
+    # what generate_appcast writes, as well as the attribute form some Sparkle
+    # versions emit. Matching only the attribute meant this guard found nothing
+    # and silently never fired — a shipped build number that failed to increase
+    # would have gone out unnoticed, and Sparkle would then offer the update to
+    # nobody, which is the kind of failure users never report.
+    LAST=$(/usr/bin/sed -n \
+        -e 's/.*<sparkle:version>\([0-9][0-9]*\)<.*/\1/p' \
+        -e 's/.*sparkle:version="\([0-9][0-9]*\)".*/\1/p' \
+        "$PAGES_APPCAST" | sort -n | tail -n1)
     if [ -n "${LAST:-}" ] && [ "$BUILD_NUMBER" -le "$LAST" ]; then
         echo "✗ BUILD_NUMBER ($BUILD_NUMBER) must be > last shipped sparkle:version ($LAST). Override with BUILD_NUMBER=…" >&2
         exit 1
