@@ -332,12 +332,34 @@ final class AppState: ObservableObject {
         BatteryInfo(percent: batteryPercent, onAC: batteryOnAC)
     }
 
-    /// Change the auto-off duration. Re-arms (or cancels) the live timer when
-    /// keep-awake is currently on.
-    func setAutoOffMinutes(_ minutes: Int) {
+    /// "Keep awake for N minutes" — the whole gesture, in one call.
+    ///
+    /// Turns keep-awake on when it isn't already, because that is plainly what
+    /// asking for fifteen minutes of it means. Making someone flip the switch
+    /// first and *then* set a duration is making them do the bookkeeping.
+    ///
+    /// Note the ordering when it has to enable: the duration is persisted first,
+    /// then the write goes out, and the countdown is armed from the write's
+    /// confirmation (via `updateAutoOff(for:)`). So if the safety policy refuses
+    /// — flat battery, running hot — no timer is left counting down for a state
+    /// the Mac never entered.
+    func keepAwakeFor(minutes: Int) {
+        let request = AutoOff.request(minutes: minutes,
+                                      isEnabled: isEnabled,
+                                      autoModeOn: settings.autoEnableWhenCharging)
+        guard request != .ignoredInAutoMode else { return }
         autoOffMinutes = minutes
         store.saveAutoOffMinutes(minutes)
-        if isEnabled { armAutoOff() } else { cancelAutoOff() }
+        switch request {
+        case .ignoredInAutoMode:
+            break
+        case .cancelTimer:
+            cancelAutoOff()
+        case .armTimer:
+            armAutoOff()
+        case .enableThenArmTimer:
+            setEnabled(true, origin: .user)
+        }
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {

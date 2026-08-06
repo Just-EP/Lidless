@@ -8,6 +8,41 @@ public enum AutoOff {
     /// Selectable durations (minutes). `0` means "no auto-off" (stay on until off).
     public static let presetMinutes = [15, 30, 60, 120, 240]
 
+    /// What picking a duration should do.
+    ///
+    /// "Keep awake for 15 minutes" is one intention, and asking someone to
+    /// perform it as two steps — flip the switch, then find the timer — is
+    /// asking them to do the app's bookkeeping. So choosing a duration turns
+    /// keep-awake on if it isn't already.
+    public enum Request: Equatable {
+        /// Auto mode decides activation from power and safety; a countdown would
+        /// disarm the feature out from under it, so the control does nothing
+        /// while that's on. (The UI disables it and says why rather than letting
+        /// it look live.)
+        case ignoredInAutoMode
+        /// "No limit" — drop any countdown. Deliberately does *not* turn
+        /// keep-awake off: removing the time limit is not the same request as
+        /// stopping, and the master toggle is right there for stopping.
+        case cancelTimer
+        /// Already on, so there's nothing to switch — just (re)start the count.
+        case armTimer(minutes: Int)
+        /// Off, and a duration was asked for. Turn it on; the countdown starts
+        /// when the write is confirmed, so a refusal on safety grounds leaves no
+        /// timer running for a state that never happened.
+        case enableThenArmTimer(minutes: Int)
+    }
+
+    public static func request(minutes: Int, isEnabled: Bool, autoModeOn: Bool) -> Request {
+        if autoModeOn { return .ignoredInAutoMode }
+        guard minutes > 0 else { return .cancelTimer }
+        return isEnabled ? .armTimer(minutes: minutes) : .enableThenArmTimer(minutes: minutes)
+    }
+
+    /// Label for the duration control, e.g. `No limit`, `15 min`, `1 hour`.
+    public static func durationLabel(minutes: Int) -> String {
+        minutes > 0 ? optionLabel(minutes: minutes) : "No limit"
+    }
+
     /// When a timer started `minutes` ago from `start` should fire.
     public static func deadline(from start: Date, minutes: Int) -> Date {
         start.addingTimeInterval(TimeInterval(minutes) * 60)
