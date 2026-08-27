@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/scripts/prepare_self_build.py'
       - '.github/scripts/fix_self_status.py'
+      - '.github/scripts/fix_external_notice.py'
       - '.github/workflows/self-build.yml'
 
 jobs:
@@ -25,6 +26,13 @@ jobs:
         run: |
           python3 .github/scripts/fix_self_status.py
           grep -F 'Text("自用模式已启用")' Sources/Lidless/MenuContent.swift
+
+      - name: Fix external sleep warning
+        run: |
+          python3 .github/scripts/fix_external_notice.py
+          grep -F 'return L10n.tr("Sleep prevention was turned off outside Lidless.")' Sources/Shared/StateReconciler.swift
+          grep -F 'if origin == .auto, target { externalNotice = nil }' Sources/Lidless/AppState.swift
+          grep -F '"Sleep prevention was turned off outside Lidless." = "检测到 Lidless 之外关闭了防休眠。";' Resources/zh-Hans.lproj/Localizable.strings
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -73,6 +81,7 @@ jobs:
           /usr/bin/grep -F '"Keep awake with lid closed" = "合盖保持唤醒";' "$DST/Localizable.strings"
           /usr/bin/grep -F '"Safety" = "安全";' "$DST/Localizable.strings"
           /usr/bin/grep -F '"Settings…" = "设置…";' "$DST/Localizable.strings"
+          /usr/bin/grep -F '"Sleep prevention was turned off outside Lidless." = "检测到 Lidless 之外关闭了防休眠。";' "$DST/Localizable.strings"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleLocalizations:0' "$PLIST" | grep -Fx 'zh-Hans'
           /usr/libexec/PlistBuddy -c 'Print :CFBundleDevelopmentRegion' "$PLIST" | grep -Fx 'zh-Hans'
 
@@ -90,12 +99,15 @@ jobs:
           guard dict["Keep awake with lid closed"] == "合盖保持唤醒" else { fatalError("primary toggle translation missing") }
           guard dict["Safety"] == "安全" else { fatalError("safety translation missing") }
           guard dict["Settings…"] == "设置…" else { fatalError("settings translation missing") }
+          guard dict["Sleep prevention was turned off outside Lidless."] == "检测到 Lidless 之外关闭了防休眠。" else { fatalError("external-off translation missing") }
           let main = bundle.localizedString(forKey: "Keep awake with lid closed", value: "Keep awake with lid closed", table: nil)
           let safety = bundle.localizedString(forKey: "Safety", value: "Safety", table: nil)
           let settings = bundle.localizedString(forKey: "Settings…", value: "Settings…", table: nil)
+          let externalOff = bundle.localizedString(forKey: "Sleep prevention was turned off outside Lidless.", value: "Sleep prevention was turned off outside Lidless.", table: nil)
           guard main == "合盖保持唤醒" else { fatalError("resolved primary toggle is not Chinese: \(main)") }
           guard safety == "安全" else { fatalError("resolved safety is not Chinese: \(safety)") }
           guard settings == "设置…" else { fatalError("resolved settings is not Chinese: \(settings)") }
+          guard externalOff == "检测到 Lidless 之外关闭了防休眠。" else { fatalError("resolved external-off notice is not Chinese: \(externalOff)") }
           SWIFT
           /usr/bin/swift /tmp/check_l10n.swift "$APP"
 
