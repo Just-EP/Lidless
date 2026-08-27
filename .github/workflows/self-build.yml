@@ -43,11 +43,46 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify
 
+      - name: Embed and verify Chinese localization
+        run: |
+          set -euo pipefail
+          APP="$PWD/build/Build/Products/Release/Lidless.app"
+          SRC="$PWD/Resources/zh-Hans.lproj/Localizable.strings"
+          DST="$APP/Contents/Resources/zh-Hans.lproj"
+
+          test -d "$APP"
+          test -s "$SRC"
+          mkdir -p "$DST"
+          cp "$SRC" "$DST/Localizable.strings"
+
+          # Hard acceptance checks: never publish another English-only artifact.
+          test -s "$DST/Localizable.strings"
+          /usr/bin/plutil -lint "$DST/Localizable.strings"
+          /usr/bin/grep -F '"Keep awake with lid closed" = "合盖保持唤醒";' "$DST/Localizable.strings"
+          /usr/bin/grep -F '"Safety" = "安全";' "$DST/Localizable.strings"
+          /usr/bin/grep -F '"Settings…" = "设置…";' "$DST/Localizable.strings"
+
+          cat > /tmp/check_l10n.swift <<'SWIFT'
+          import Foundation
+          let app = CommandLine.arguments[1]
+          guard let bundle = Bundle(path: app) else { fatalError("cannot open app bundle") }
+          guard let path = bundle.path(forResource: "Localizable", ofType: "strings", inDirectory: nil, forLocalization: "zh-Hans") else {
+              fatalError("zh-Hans Localizable.strings is not visible through Bundle")
+          }
+          let dict = NSDictionary(contentsOfFile: path) as? [String: String] ?? [:]
+          guard dict["Keep awake with lid closed"] == "合盖保持唤醒" else { fatalError("primary toggle translation missing") }
+          guard dict["Safety"] == "安全" else { fatalError("safety translation missing") }
+          guard dict["Settings…"] == "设置…" else { fatalError("settings translation missing") }
+          print("Chinese localization verified:", path)
+          SWIFT
+          /usr/bin/swift /tmp/check_l10n.swift "$APP"
+
       - name: Ad-hoc sign and package
         run: |
           set -euo pipefail
           APP="$PWD/build/Build/Products/Release/Lidless.app"
           test -d "$APP"
+          test -s "$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings"
 
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict "$APP"
@@ -63,6 +98,9 @@ jobs:
             -srcfolder dist/stage \
             -ov -format UDZO \
             dist/Lidless-zh-Hans-self.dmg
+
+          # Verify the actual distributable ZIP also contains Chinese resources.
+          unzip -l dist/Lidless-zh-Hans-self.zip | grep -F 'Lidless.app/Contents/Resources/zh-Hans.lproj/Localizable.strings'
 
           shasum -a 256 dist/Lidless-zh-Hans-self.zip dist/Lidless-zh-Hans-self.dmg > dist/SHA256SUMS.txt
           cat dist/SHA256SUMS.txt
