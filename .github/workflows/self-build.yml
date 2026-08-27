@@ -1,0 +1,78 @@
+name: Build Chinese Self-Use DMG
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/scripts/prepare_self_build.py'
+      - '.github/workflows/self-build.yml'
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install xcodegen xcbeautify
+
+      - name: Apply Chinese self-build patch
+        run: python3 .github/scripts/prepare_self_build.py .
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build and test patched sources
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -scheme Lidless-CI \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify
+
+      - name: Build release app
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -scheme Lidless \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify
+
+      - name: Ad-hoc sign and package
+        run: |
+          set -euo pipefail
+          APP="$PWD/build/Build/Products/Release/Lidless.app"
+          test -d "$APP"
+
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+
+          rm -rf dist
+          mkdir -p dist/stage
+          cp -R "$APP" dist/stage/
+          ln -s /Applications dist/stage/Applications
+
+          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/Lidless-zh-Hans-self.zip
+          hdiutil create \
+            -volname 'Lidless 中文自用版' \
+            -srcfolder dist/stage \
+            -ov -format UDZO \
+            dist/Lidless-zh-Hans-self.dmg
+
+          shasum -a 256 dist/Lidless-zh-Hans-self.zip dist/Lidless-zh-Hans-self.dmg > dist/SHA256SUMS.txt
+          cat dist/SHA256SUMS.txt
+
+      - name: Upload app and DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lidless-zh-Hans-self
+          path: |
+            dist/Lidless-zh-Hans-self.dmg
+            dist/Lidless-zh-Hans-self.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
