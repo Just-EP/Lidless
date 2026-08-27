@@ -20,6 +20,34 @@ jobs:
       - name: Apply Chinese self-build patch
         run: python3 .github/scripts/prepare_self_build.py .
 
+      - name: Fix self-build status row
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Sources/Lidless/MenuContent.swift')
+          s = p.read_text(encoding='utf-8')
+          old = '''            HStack(spacing: 6) {
+                Image(systemName: state.usingHelper ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .foregroundStyle(state.usingHelper ? .green : .orange)
+                Text(L10n.tr(state.usingHelper ? "Helper active" : "Helper inactive"))
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(state.usingHelper ? "Background helper active" : "Background helper inactive")
+'''
+          new = '''            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("自用模式已启用")
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("自用模式已启用")
+'''
+          if old not in s:
+              raise SystemExit('status row patch anchor not found')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          PY
+          grep -F 'Text("自用模式已启用")' Sources/Lidless/MenuContent.swift
+
       - name: Generate Xcode project
         run: xcodegen generate
 
@@ -72,6 +100,9 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Print :CFBundleLocalizations:0' "$PLIST" | grep -Fx 'zh-Hans'
           /usr/libexec/PlistBuddy -c 'Print :CFBundleDevelopmentRegion' "$PLIST" | grep -Fx 'zh-Hans'
 
+          # Verify the built executable contains the self-build status text.
+          /usr/bin/strings "$APP/Contents/MacOS/Lidless" | /usr/bin/grep -F '自用模式已启用'
+
           cat > /tmp/check_l10n.swift <<'SWIFT'
           import Foundation
           let app = CommandLine.arguments[1]
@@ -89,7 +120,6 @@ jobs:
           guard dict["Safety"] == "安全" else { fatalError("safety translation missing") }
           guard dict["Settings…"] == "设置…" else { fatalError("settings translation missing") }
 
-          // Verify what an English CI host actually resolves from the final bundle.
           let main = bundle.localizedString(forKey: "Keep awake with lid closed", value: "Keep awake with lid closed", table: nil)
           let safety = bundle.localizedString(forKey: "Safety", value: "Safety", table: nil)
           let settings = bundle.localizedString(forKey: "Settings…", value: "Settings…", table: nil)
