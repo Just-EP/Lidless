@@ -47,6 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           APP="$PWD/build/Build/Products/Release/Lidless.app"
+          PLIST="$APP/Contents/Info.plist"
           SRC="$PWD/Resources/zh-Hans.lproj/Localizable.strings"
           DST="$APP/Contents/Resources/zh-Hans.lproj"
 
@@ -55,17 +56,27 @@ jobs:
           mkdir -p "$DST"
           cp "$SRC" "$DST/Localizable.strings"
 
+          # Explicitly advertise supported localizations in the final app bundle.
+          /usr/libexec/PlistBuddy -c 'Delete :CFBundleLocalizations' "$PLIST" >/dev/null 2>&1 || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleLocalizations array' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleLocalizations:0 string en' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleLocalizations:1 string zh-Hans' "$PLIST"
+
           # Hard acceptance checks: never publish another English-only artifact.
           test -s "$DST/Localizable.strings"
           /usr/bin/plutil -lint "$DST/Localizable.strings"
           /usr/bin/grep -F '"Keep awake with lid closed" = "合盖保持唤醒";' "$DST/Localizable.strings"
           /usr/bin/grep -F '"Safety" = "安全";' "$DST/Localizable.strings"
           /usr/bin/grep -F '"Settings…" = "设置…";' "$DST/Localizable.strings"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleLocalizations:1' "$PLIST" | grep -Fx 'zh-Hans'
 
           cat > /tmp/check_l10n.swift <<'SWIFT'
           import Foundation
           let app = CommandLine.arguments[1]
           guard let bundle = Bundle(path: app) else { fatalError("cannot open app bundle") }
+          guard bundle.localizations.contains(where: { $0 == "zh-Hans" || $0 == "zh_CN" }) else {
+              fatalError("Bundle does not advertise Simplified Chinese: \(bundle.localizations)")
+          }
           guard let path = bundle.path(forResource: "Localizable", ofType: "strings", inDirectory: nil, forLocalization: "zh-Hans") else {
               fatalError("zh-Hans Localizable.strings is not visible through Bundle")
           }
@@ -73,7 +84,7 @@ jobs:
           guard dict["Keep awake with lid closed"] == "合盖保持唤醒" else { fatalError("primary toggle translation missing") }
           guard dict["Safety"] == "安全" else { fatalError("safety translation missing") }
           guard dict["Settings…"] == "设置…" else { fatalError("settings translation missing") }
-          print("Chinese localization verified:", path)
+          print("Chinese localization verified:", bundle.localizations, path)
           SWIFT
           /usr/bin/swift /tmp/check_l10n.swift "$APP"
 
